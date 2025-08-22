@@ -1,5 +1,3 @@
-# backend/app/schemas/telemetry.py (НОВАЯ, ПРАВИЛЬНАЯ ВЕРСИЯ)
-
 """
 Pydantic models for telemetry data.
 """

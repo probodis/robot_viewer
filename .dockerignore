@@ -1,0 +1,18 @@
+# This file tells Docker which files and directories to IGNORE when building an image.
+# This speeds up the build process and results in a smaller final image size.
+
+# Git and IDE configurations
+.git
+.gitignore
+.idea/
+.vscode/
+
+# Documentation not needed in the image
+README.md
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node.js

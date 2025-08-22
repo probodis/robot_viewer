@@ -1,0 +1,19 @@
+# This file tells Git which files and directories to IGNORE and not track.
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node.js
+frontend/node_modules/
+
+# IDE-specific files
+.idea/
+.vscode/
+
+# System files from macOS and Windows
+.DS_Store
+Thumbs.db
+
+# Environment variable files (usually contain secrets)
