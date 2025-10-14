@@ -19,6 +19,8 @@ import {
   GridComponent,
   LegendComponent,
   MarkLineComponent,
+  DataZoomComponent,
+  ToolboxComponent,
 } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { ref, computed, watch } from 'vue'
@@ -31,6 +33,8 @@ use([
   GridComponent,
   LegendComponent,
   MarkLineComponent,
+  DataZoomComponent,
+  ToolboxComponent,
 ])
 
 // --- Props and Emits ---
@@ -102,6 +106,8 @@ const allCategoryValues = computed(() => {
   return Array.from(allValues);
 });
 
+
+
 const chartOption = computed(() => {
   // 1. Create visible series from chart data
   const dataSeries = props.chartData.map((seriesItem) => {
@@ -134,11 +140,13 @@ const chartOption = computed(() => {
         width: 2,
       },
       label: { show: false },
-      data: [{ xAxis: props.currentTime }],
+      data: [], // не зависит от currentTime!
     },
   }
 
-  return {
+  // Добавляем dataZoom только для графика Weight
+  const isWeightChart = props.title && props.title.toLowerCase().includes('weight')
+  const option = {
     title: {
       text: props.title,
       left: 'center',
@@ -169,6 +177,66 @@ const chartOption = computed(() => {
     },
     series: [...dataSeries, markLineHostSeries],
   }
+  if (isWeightChart) {
+    option.toolbox = {
+      feature: {
+        dataZoom: {
+          yAxisIndex: 'all',
+          title: {
+            zoom: 'Масштабировать по Y',
+            back: 'Сбросить масштаб'
+          }
+        },
+        restore: { title: 'Сбросить' }
+      },
+      right: 20
+    }
+    option.dataZoom = [
+      {
+        type: 'slider',
+        yAxisIndex: 0,
+        filterMode: 'none',
+        show: true,
+        width: 16,
+        right: 0,
+        top: 40,
+        bottom: 60,
+        handleSize: 20,
+        backgroundColor: '#f2f2f2',
+        fillerColor: '#e83e8c33',
+        borderColor: '#e83e8c',
+        showDetail: true,
+        realtime: true
+      },
+      {
+        type: 'inside',
+        yAxisIndex: 0,
+        filterMode: 'none',
+        zoomOnMouseWheel: true,
+        moveOnMouseMove: true,
+        moveOnMouseWheel: true
+      }
+    ]
+  }
+  return option
+})
+
+// Обновляем только markLine при изменении currentTime, чтобы не сбрасывать dataZoom
+import { nextTick } from 'vue'
+watch(() => props.currentTime, (newTime) => {
+  nextTick(() => {
+    const chart = chartComponentRef.value && chartComponentRef.value.getEchartsInstance && chartComponentRef.value.getEchartsInstance()
+    if (chart) {
+      // Обновляем только markLine у нужной серии, не трогая остальные опции
+      chart.setOption({
+        series: chart.getOption().series.map(s =>
+          s.name === '__MARKLINE_HOST__'
+            ? { ...s, markLine: { ...s.markLine, data: [{ xAxis: newTime }] } }
+            : {}
+        )
+      }, false, false)
+    }
+  })
 })
 
 function handleChartMouseMove(params) {
