@@ -6,8 +6,8 @@ const apiClient = axios.create({
 });
 
 export default {
-  getOrderList: () => apiClient.get('/v1/orders'),
   getOrderData: (orderId) => apiClient.get(`/v1/orders/${orderId}`),
-  getVideoUrl: (filename) => `${apiClient.defaults.baseURL}/videos/${filename}`,
+  // Use absolute path to match backend route (not proxied)
+  getVideoUrl: (filename) => `/videos/${filename}`,
   getBackendVersion: () => apiClient.get('/v1/version'),
 };

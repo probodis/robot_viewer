@@ -2,15 +2,17 @@
   <div class="viewer-container">
     <h1>Robot Telemetry Viewer</h1>
 
-    <div v-if="orderIds.length > 0" class="order-selector">
-
-      <label for="order-select">Select an order:</label>
-      <select id="order-select" v-model="selectedOrderId" @change="navigateToOrder">
-        <option disabled value="">-- Please select an order --</option>
-        <option v-for="id in orderIds" :key="id" :value="id">
-          {{ id }}
-        </option>
-      </select>
+    <div class="order-selector">
+      <label for="order-input">Enter order ID:</label>
+      <input
+        id="order-input"
+        type="text"
+        v-model="selectedOrderId"
+        @keyup.enter="navigateToOrder"
+        placeholder="Type order ID and press Enter"
+        autocomplete="off"
+      />
+      <button @click="navigateToOrder" :disabled="!selectedOrderId">Load</button>
     </div>
 
     <div v-if="orderData" class="main-content">
@@ -70,7 +72,7 @@
     </div>
 
     <div v-else>
-      <p>Please select an order to view.</p>
+      <p>Please enter an order UID to view.</p>
     </div>
 
     <div class="version-info">
@@ -94,7 +96,6 @@ const props = defineProps({
 })
 
 const router = useRouter()
-const orderIds = ref([])
 const selectedOrderId = ref('')
 const orderData = ref(null)
 const videoUrl = ref('')
@@ -107,15 +108,11 @@ const backendVersion = ref('N/A')
 
 onMounted(async () => {
   try {
-    const response = await api.getOrderList()
-    orderIds.value = response.data
     if (props.order_id) {
       selectedOrderId.value = props.order_id
     }
-
     const versionResponse = await api.getBackendVersion();
     backendVersion.value = versionResponse.data.version;
-
   } catch (error) {
     console.error('Failed to perform initial data load:', error)
   }
