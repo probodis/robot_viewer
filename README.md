@@ -25,19 +25,26 @@ To get the application up and running, follow these steps:
 
 1.  **Place Your Data**
 
-    Create a `data` directory in the project root. It must have the following structure:
+    Create a `data` directory in the project root. It must have the following structure and file naming:
 
     ```text
     robot_viewer/
     └── data/
-        ├── orders_logs.txt
-        ├── telemetry_logs.txt
+        ├── orders/
+        │     ├── 2025-09-04_orders.txt
+        │     ├── 2025-09-05_orders.txt
+        │     └── ...
+        ├── start_order/
+        │     ├── 2025-09-04_start_order.txt
+        │     ├── 2025-09-05_start_order.txt
+        │     └── ...
         └── videos/
-            ├── 2024-02-11_23-47-57.mp4
-            └── ...
-        └── processed_data/  <- This directory will be created by the script
+              ├── 2024-02-11_23-47-57.mp4
+              └── ...
     ```
-    *The `processed_data` directory will be created automatically when you run the processing script.*
+    - All files in `orders/` must be named as `<date>_orders.txt` (for example: `2025-09-04_orders.txt`).
+    - All files in `start_order/` must be named as `<date>_start_order.txt` (for example: `2025-09-04_start_order.txt`).
+    - All video files in `videos/` must be named as `<date>_<time>.mp4` (for example: `2024-02-11_23-47-57.mp4`).
 
 2.  **Start the Services**
 
@@ -49,25 +56,18 @@ To get the application up and running, follow these steps:
 
     This will build the Docker images and start the frontend and backend services. The application will be running, but no data will be available yet.
 
-3.  **Process the Data**
 
-    In a **new terminal window**, run the following command to execute the data preparation script inside the running `backend` container:
+3.  **No Data Processing Needed**
 
-    ```bash
-    docker-compose exec backend python scripts/prepare_data.py
-    ```
-    
-    This script processes files from the mounted `/data` volume and saves the results into `./data/processed_data/`. The API will automatically detect and load the new data on the next request.
+    You do not need to run any data preparation scripts. The backend will read the raw data files from the `orders/`, `start_order/`, and `videos/` folders directly.
 
 4.  **Access the Application**
 
-    * The **frontend** will be available at [http://localhost:5173](http://localhost:5173).
+    * The **frontend** will be available at [http://localhost:5173/robot_viewer/](http://localhost:5173/robot_viewer/).
     * The **backend** API will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
 
 ---
 
 ## Future Improvements
 
-- [ ] **Web UI for Preprocessing**: Create a user interface for running the data preparation script to avoid manual command-line execution.
 - [ ] **Chart Interaction Bug**: Fix the issue where the 'State' chart freezes upon mouseover.
-- [ ] **Security Enhancement**: Replace the use of `ast.literal_eval` in `prepare_data.py` with a safer data parsing method (e.g., JSON) to mitigate potential security risks.

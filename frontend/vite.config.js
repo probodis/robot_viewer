@@ -4,6 +4,7 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
 export default defineConfig({
+  base: '/robot_viewer/',
   plugins: [
     vue(),
     vueDevTools(),
@@ -14,6 +15,7 @@ export default defineConfig({
     },
   },
   server: {
+    allowedHosts: ['sandbox.xrobotics.io'],
     proxy: {
       '/api': {
         target: 'http://backend:8000',
