@@ -15,4 +15,8 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    environment:
+      - VITE_API_PROXY_TARGET=http://backend:8000
     command: npm run dev -- --host
+    depends_on:
+      - backend
