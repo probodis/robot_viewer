@@ -3,7 +3,17 @@
     <h1>Robot Telemetry Viewer</h1>
 
     <div class="order-selector">
-      <label for="order-input">Enter order ID:</label>
+      <label for="machine-input">Enter machine ID:</label>
+      <input
+        id="machine-input"
+        type="text"
+        v-model="selectedMachineId"
+        @keyup.enter="navigateToOrder"
+        placeholder="e.g. cb-3-0020"
+        style="margin-left: 5px;"
+        autocomplete="off"
+      />
+      <label for="order-input" style="margin-left: 10px;">Enter order ID:</label>
       <input
         id="order-input"
         type="text"
@@ -11,8 +21,12 @@
         @keyup.enter="navigateToOrder"
         placeholder="Type order ID and press Enter"
         autocomplete="off"
+        style="margin-left: 5px;"
       />
-      <button @click="navigateToOrder" :disabled="!selectedOrderId">Load</button>
+      <button
+        @click="navigateToOrder" :disabled="!selectedOrderId || !selectedMachineId"
+        style="margin-left: 5px;"
+      >Load</button>
     </div>
 
     <div v-if="orderData" class="main-content">
@@ -20,7 +34,7 @@
         <h3>Order Video: {{ orderData.order_id }}</h3>
         <video
           ref="videoPlayer"
-          :src="videoUrl"
+          :src="orderData.video_path"
           controls
           @timeupdate="handleVideoTimeUpdate"
           @seeking="handleVideoSeeking"
@@ -83,22 +97,17 @@
 
 <script setup>
 import { ref, onMounted, watch, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { version as frontendVersion } from '../../package.json'
 import api from '../services/api'
 import TelemetryChart from '../components/TelemetryChart.vue'
 
-const props = defineProps({
-  order_id: {
-    type: String,
-    default: ''
-  }
-})
-
 const router = useRouter()
+const route = useRoute()
+
 const selectedOrderId = ref('')
+const selectedMachineId = ref('')
 const orderData = ref(null)
-const videoUrl = ref('')
 const isLoading = ref(false)
 const isPaused = ref(true)
 
@@ -108,8 +117,16 @@ const backendVersion = ref('N/A')
 
 onMounted(async () => {
   try {
-    if (props.order_id) {
-      selectedOrderId.value = props.order_id
+    // Set input fields from route query on mount
+    if (route.query.order_id) {
+      selectedOrderId.value = route.query.order_id
+    }
+    if (route.query.machine_id) {
+      selectedMachineId.value = route.query.machine_id
+    }
+    // Fetch data if both are present
+    if (selectedOrderId.value && selectedMachineId.value) {
+      await fetchOrderData(selectedMachineId.value, selectedOrderId.value)
     }
     const versionResponse = await api.getBackendVersion();
     backendVersion.value = versionResponse.data.version;
@@ -118,8 +135,8 @@ onMounted(async () => {
   }
 })
 
-async function fetchOrderData(orderId) {
-  if (!orderId) {
+async function fetchOrderData(machineId, orderId) {
+  if (!machineId || !orderId) {
     orderData.value = null
     return
   }
@@ -127,27 +144,34 @@ async function fetchOrderData(orderId) {
   orderData.value = null
   syncedTime.value = 0
   try {
-    const response = await api.getOrderData(orderId)
+    const response = await api.getOrderData(machineId, orderId)
     orderData.value = response.data
-    videoUrl.value = api.getVideoUrl(response.data.video_filename)
   } catch (error) {
-    console.error(`Failed to load data for order ${orderId}:`, error)
+    console.error(`Failed to load data for machine ${machineId}, order ${orderId}:`, error)
   } finally {
     isLoading.value = false
   }
 }
 
-watch(() => props.order_id, (newOrderId) => {
-    fetchOrderData(newOrderId);
-    if (newOrderId) {
-        selectedOrderId.value = newOrderId;
+
+
+// Watch route query for changes and fetch data
+watch(
+  () => [route.query.order_id, route.query.machine_id],
+  ([newOrderId, newMachineId]) => {
+    if (newOrderId) selectedOrderId.value = newOrderId
+    if (newMachineId) selectedMachineId.value = newMachineId
+    if (newOrderId && newMachineId) {
+      fetchOrderData(newMachineId, newOrderId)
     }
-}, { immediate: true });
+  },
+  { immediate: true }
+)
 
 
 function navigateToOrder() {
-  if (selectedOrderId.value) {
-    router.push({ name: 'robot-viewer', query: { order_id: selectedOrderId.value } })
+  if (selectedOrderId.value && selectedMachineId.value) {
+    router.push({ name: 'robot-viewer', query: { order_id: selectedOrderId.value, machine_id: selectedMachineId.value } })
   }
 }
 

@@ -20,3 +20,6 @@ Thumbs.db
 
 # Custom ignore rules
 data/
+.env*
+
+.github/

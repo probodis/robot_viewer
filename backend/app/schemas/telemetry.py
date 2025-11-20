@@ -28,6 +28,6 @@ class OrderTelemetry(BaseModel):
     order_id: str = Field(..., description="The unique UTC marker for the order.")
     start_time: float = Field(..., description="Absolute UTC start time of the order.")
     end_time: float = Field(..., description="Absolute UTC end time of the order.")
-    video_filename: str = Field(..., description="The filename of the corresponding video.")
+    video_path: str = Field(..., description="The path to the corresponding video file.")
     # All robot components are now stored in a single dictionary.
     motors: Dict[str, MotorNodeData]
