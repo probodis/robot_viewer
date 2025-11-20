@@ -15,14 +15,9 @@ export default defineConfig({
     },
   },
   server: {
-    allowedHosts: ['sandbox.xrobotics.io'],
+    allowedHosts: ['sandbox.xrobotics.io', 'xapi.xrobotics.io'],
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
-        changeOrigin: true,
-        secure: false,
-      },
-      '/videos': {
         target: 'http://backend:8000',
         changeOrigin: true,
         secure: false,
