@@ -42,7 +42,7 @@ class CustomDailyFileHandler(TimedRotatingFileHandler):
         super().doRollover()
 
 logger = logging.getLogger("robot_viewer")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 handler = CustomDailyFileHandler(logs_dir=LOGS_DIR)
 formatter = logging.Formatter(
@@ -80,9 +80,9 @@ def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path] | 
     start_time = time.perf_counter()
     dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
     date_ts = dt.date()
-    logger.info(f"Searching files for machine_id={machine_id} and date={date_ts}")
     orders_dir = DATA_DIR / machine_id / "logs" / "orders"
     start_order_dir = DATA_DIR / machine_id / "logs" / "start_order"
+    logger.info(f"Searching files for machine_id={machine_id} and date={date_ts}, orders_dir={orders_dir}, start_order_dir={start_order_dir}")
 
     def find_file(dir_path: Path, prefix: str):
         files = sorted(
@@ -90,10 +90,12 @@ def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path] | 
             key=lambda f: f.name,
             reverse=True
         )
+        logger.debug(f"Found {len(files)} files in {dir_path} for prefix={prefix}")
         for f in files:
             match = re.match(r"(\d{4}-\d{2}-\d{2})_" + prefix + r"\.txt(\.gz)?$", f.name)
             if match:
                 file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+                logger.debug(f"Checking file {f} with date {file_date} against target date {date_ts}")
                 if file_date <= date_ts:
                     
                     end_time = time.perf_counter()
