@@ -12,14 +12,12 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
-    build: ./frontend
-    ports:
-      - "5173:5173"
+    build:
+      context: ./frontend
+      target: dist
     volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - VITE_API_PROXY_TARGET=http://backend:8000
-    command: npm run build && npx serve dist --single --listen 5173
-    depends_on:
-      - backend
+      - frontend_dist:/dist
+    command: ["/bin/sh", "-c", "cp -r ./* /dist"]
+
+volumes:
+  frontend_dist:
