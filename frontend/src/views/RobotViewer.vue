@@ -29,55 +29,65 @@
       >Load</button>
     </div>
 
-    <div v-if="orderData" class="main-content">
-      <div class="video-section">
-        <h3>Order Video: {{ orderData.order_id }}</h3>
-        <video
-          ref="videoPlayer"
-          :src="orderData.video_path"
-          controls
-          @timeupdate="handleVideoTimeUpdate"
-          @seeking="handleVideoSeeking"
-          @pause="isPaused = true"
-          @play="isPaused = false"
-          muted
-          width="640"
-        >
-        </video>
+    <div v-if="orderData">
+      <div class="main-content">
+        <!-- Левая колонка: только видео -->
+        <div class="left-column">
+          <div class="video-section">
+            <h3>Order Video: {{ orderData.order_id }}</h3>
+            <video
+              ref="videoPlayer"
+              :src="orderData.video_path"
+              controls
+              @timeupdate="handleVideoTimeUpdate"
+              @seeking="handleVideoSeeking"
+              @pause="isPaused = true"
+              @play="isPaused = false"
+              muted
+            ></video>
+          </div>
+        </div>
+
+        <!-- Правая колонка: графики -->
+        <div class="charts-section">
+          <h3>Telemetry Charts</h3>
+
+          <TelemetryChart
+            v-if="weightSeries.length > 0"
+            title="Weight (grams)"
+            :chart-data="weightSeries"
+            :current-time="syncedTime"
+            @time-updated="handleChartTimeUpdate"
+          />
+
+          <TelemetryChart
+            title="Velocity"
+            :chart-data="velocitySeries"
+            :current-time="syncedTime"
+            @time-updated="handleChartTimeUpdate"
+          />
+
+          <TelemetryChart
+            title="Position"
+            :chart-data="positionSeries"
+            :current-time="syncedTime"
+            @time-updated="handleChartTimeUpdate"
+          />
+
+          <TelemetryChart
+            title="State"
+            :chart-data="stateSeries"
+            :current-time="syncedTime"
+            y-axis-type="category"
+            @time-updated="handleChartTimeUpdate"
+          />
+        </div>
       </div>
 
-      <div class="charts-section">
-        <h3>Telemetry Charts</h3>
-
-        <TelemetryChart
-          v-if="weightSeries.length > 0"
-          title="Weight (grams)"
-          :chart-data="weightSeries"
-          :current-time="syncedTime"
-          @time-updated="handleChartTimeUpdate"
-        />
-
-        <TelemetryChart
-          title="Velocity"
-          :chart-data="velocitySeries"
-          :current-time="syncedTime"
-          @time-updated="handleChartTimeUpdate"
-        />
-
-        <TelemetryChart
-          title="Position"
-          :chart-data="positionSeries"
-          :current-time="syncedTime"
-          @time-updated="handleChartTimeUpdate"
-        />
-
-        <TelemetryChart
-          title="State"
-          :chart-data="stateSeries"
-          :current-time="syncedTime"
-          y-axis-type="category"
-          @time-updated="handleChartTimeUpdate"
-        />
+      <!-- Логи под обеими колонками -->
+      <div class="logs-section-below">
+        <h3>Logs</h3>
+        <LogTabs v-if="orderData?.logs" :logs="orderData.logs" />
       </div>
     </div>
 
@@ -101,6 +111,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { version as frontendVersion } from '../../package.json'
 import api from '../services/api'
 import TelemetryChart from '../components/TelemetryChart.vue'
+import LogTabs from '../components/LogTabs.vue' // <-- импорт компонента
 
 const router = useRouter()
 const route = useRoute()
@@ -117,14 +128,8 @@ const backendVersion = ref('N/A')
 
 onMounted(async () => {
   try {
-    // Set input fields from route query on mount
-    if (route.query.order_id) {
-      selectedOrderId.value = route.query.order_id
-    }
-    if (route.query.machine_id) {
-      selectedMachineId.value = route.query.machine_id
-    }
-    // Fetch data if both are present
+    if (route.query.order_id) selectedOrderId.value = route.query.order_id
+    if (route.query.machine_id) selectedMachineId.value = route.query.machine_id
     if (selectedOrderId.value && selectedMachineId.value) {
       await fetchOrderData(selectedMachineId.value, selectedOrderId.value)
     }
@@ -153,21 +158,15 @@ async function fetchOrderData(machineId, orderId) {
   }
 }
 
-
-
-// Watch route query for changes and fetch data
 watch(
   () => [route.query.order_id, route.query.machine_id],
   ([newOrderId, newMachineId]) => {
     if (newOrderId) selectedOrderId.value = newOrderId
     if (newMachineId) selectedMachineId.value = newMachineId
-    if (newOrderId && newMachineId) {
-      fetchOrderData(newMachineId, newOrderId)
-    }
+    if (newOrderId && newMachineId) fetchOrderData(newMachineId, newOrderId)
   },
   { immediate: true }
 )
-
 
 function navigateToOrder() {
   if (selectedOrderId.value && selectedMachineId.value) {
@@ -203,9 +202,7 @@ const weightSeries = computed(() => {
   if (!orderData.value) return []
   const series = []
   const screenMotor = orderData.value.motors.screen
-  if (screenMotor && screenMotor.weight) {
-    series.push({ name: 'weight', data: screenMotor.weight })
-  }
+  if (screenMotor && screenMotor.weight) series.push({ name: 'weight', data: screenMotor.weight })
   return series
 })
 
@@ -215,13 +212,10 @@ function handleVideoTimeUpdate(event) {
 function handleVideoSeeking(event) {
   syncedTime.value = event.target.currentTime
 }
-
 function handleChartTimeUpdate(newTime) {
   syncedTime.value = newTime;
   if (videoPlayer.value) {
-    if (!videoPlayer.value.paused) {
-      videoPlayer.value.pause();
-    }
+    if (!videoPlayer.value.paused) videoPlayer.value.pause();
     videoPlayer.value.currentTime = newTime;
   }
 }
@@ -234,23 +228,47 @@ function handleChartTimeUpdate(newTime) {
   max-width: 1800px;
   margin: 0 auto;
 }
+
 .order-selector {
   margin-bottom: 20px;
 }
+
 .main-content {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(500px, 1fr) 2fr;
   gap: 30px;
+  align-items: start;
 }
-.video-section,
-.charts-section {
-  flex: 1;
+
+.left-column {
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 20px;
+  align-self: start;
 }
+
+.video-section {
+  margin-bottom: 0;
+}
+
+.logs-section,
+.logs-section-below {
+  margin-top: 30px;
+  margin-bottom: 20px;
+  grid-column: 1 / -1;
+
+  min-height: 200px;
+  overflow: auto;
+}
+
 video {
   width: 100%;
   border: 1px solid #ccc;
-  position: sticky;
-  top: 20px;
+}
+
+.charts-section {
+  flex: 1;
 }
 
 .version-info {

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import re
 from typing import Any
-
+import base64
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,6 +72,147 @@ PROCESSED_DATA_DIR = DATA_DIR / "processed_data"
 
 ORDERS_DIR = DATA_DIR / "orders"
 START_ORDER_DIR = DATA_DIR / "start_order"
+
+def get_all_logs_files(machine_id: str, date_ts: str) -> dict[str, Path]:
+    """
+    Return all log files in subfolders of base_dir whose names start with the given date and end with .txt or .txt.gz.
+    Prefer .txt.gz over .txt if both exist.
+
+    Args:
+        machine_id (str): Machine identifier.
+        date_ts (str): Date string in 'YYYY-MM-DD' format.
+
+    Returns:
+        dict[str, Path]: Mapping from relative file path (str) to Path object.
+    """
+    # Accept date_ts as string and use isoformat directly for prefix
+    result: dict[str, Path] = dict()
+    base_dir = DATA_DIR / machine_id / "logs"
+    date_prefix = f"{date_ts}_"
+
+    # Walk through all subfolders in base_dir
+    for subfolder in base_dir.glob("*"):
+        if not subfolder.is_dir():
+            continue
+
+        # Find all .txt and .txt.gz files with the correct prefix
+        txt_files = list(subfolder.glob(f"{date_prefix}*.txt"))
+        gz_files = list(subfolder.glob(f"{date_prefix}*.txt.gz"))
+
+        # Build a set of base filenames (without .gz) for deduplication
+        gz_basenames = set(f.with_suffix("").name for f in gz_files)
+
+        # Add .txt.gz files first (preferred)
+        for gz_file in gz_files:
+            key = str(gz_file.relative_to(base_dir))
+            result[key] = gz_file
+
+        # Add .txt files only if there is no corresponding .txt.gz
+        for txt_file in txt_files:
+            if txt_file.name in gz_basenames:
+                continue  # Skip if .txt.gz exists
+            key = str(txt_file.relative_to(base_dir))
+            result[key] = txt_file
+
+    return result
+
+
+def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[str, Path]) -> dict[str, dict[str, str]]:
+    """
+    Extracts a window of log lines from each file, starting 5 seconds before order_id and ending 5 seconds after end_ts.
+
+    Args:
+        order_id (float): Start timestamp of the order.
+        end_order_ts (float): End timestamp of the order.
+        log_files (dict[str, Path]): Mapping from relative file path to Path object.
+
+    Returns:
+        dict[str, dict[str, str]]: Mapping from relative file path to dict with 'path' and base64-encoded 'text'.
+    """
+    window_start = order_id - 5.0
+    window_end = end_order_ts + 5.0
+
+    result: dict[str, dict[str, str]] = dict()
+
+    # Regex patterns for timestamps:
+    #   [YYYY-MM-DD HH:MM:SS]
+    #   YYYY-MM-DD HH:MM:SS(.sss)
+    ts_patterns = [
+        re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"),
+        re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)")
+    ]
+
+    def parse_timestamp(line: str) -> float | None:
+        """Return parsed timestamp as float seconds (naive → UTC naive)."""
+        for pat in ts_patterns:
+            m = pat.match(line)
+            if m:
+                ts_str = m.group(1)
+                # try microseconds first
+                try:
+                    dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        return None
+                # naive datetime → timestamp (still naive)
+                return dt.timestamp()
+        return None
+
+    for rel_path, file_path in log_files.items():
+        lines_in_window = list()
+        last_ts: float | None = None
+        found_any_ts = False
+
+        # time offset for this file (difference between file local time and UTC)
+        file_offset: float | None = None
+
+        if str(file_path).endswith(".gz"):
+            open_func = lambda: gzip.open(file_path, "rt", encoding="utf-8")
+        else:
+            open_func = lambda: file_path.open("r", encoding="utf-8")
+
+        try:
+            with open_func() as f:
+                for line in f:
+                    # Try to parse timestamp from this line
+                    ts_local = parse_timestamp(line)
+
+                    if ts_local is not None:
+                        found_any_ts = True
+
+                        # Detect timezone offset using the first timestamp in this file
+                        if file_offset is None:
+                            # Very simple timezone detection:
+                            # Compare the first log timestamp with expected order_id time.
+                            # file_offset = (local time in file) - (UTC time)
+                            file_offset = ts_local - order_id
+
+                        # Convert file-local timestamp to UTC-corrected timestamp
+                        ts_corrected = ts_local - file_offset
+                        last_ts = ts_corrected
+
+                    # Use last found timestamp for lines without timestamps
+                    if last_ts is not None and window_start <= last_ts <= window_end:
+                        lines_in_window.append(line)
+                    elif last_ts is not None and last_ts > window_end:
+                        # We passed the end of the window, stop reading the file
+                        break
+
+            if found_any_ts and lines_in_window:
+                text = "".join(lines_in_window)
+                encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                result[rel_path] = {
+                    "path": str(file_path),
+                    "text": encoded_text
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to extract log window from {file_path}: {e}")
+
+    return result
+
 
 def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path] | None:
     """
@@ -191,6 +332,23 @@ def find_video_file(machine_id: str, order_id: float) -> str | None:
     return None
 
 
+def extract_date_prefix(file_path: Path) -> str | None:
+    """
+    Extracts the date prefix (YYYY-MM-DD) from any file path in the logs directory, not just _orders files.
+
+    Args:
+        file_path (Path): Path to the log file.
+
+    Returns:
+        str | None: Extracted date prefix or None if not found.
+    """
+    # Accepts any file with a YYYY-MM-DD_ prefix in its name
+    match = re.match(r".*/(\d{4}-\d{2}-\d{2})_.*\.txt(\.gz)?$", str(file_path))
+    if match:
+        return match.group(1)
+    return None
+
+
 def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     start_time = time.perf_counter()
 
@@ -198,15 +356,26 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     if not files:
         logger.warning(f"No files found for machine_id={machine_id}, order_id={order_id}")
         return None
+    
+    # fetch_all_text_logs(machine_id)
 
-    start_order = fetch_telemetry_data(order_id, files["start_order"])
-    if not start_order:
+    order_telemetry = fetch_telemetry_data(order_id, files["start_order"])
+    if not order_telemetry:
         logger.warning(f"No start_order data found for machine_id={machine_id}, order_id={order_id}")
         return None
 
     logger.info(f"Found start_order data for order_id={order_id}")
 
     video_url = find_video_file(machine_id, order_id)
+
+    end_order_ts = order_telemetry.get("end_time", 0.0)
+
+    file_ts_prefix = extract_date_prefix(files["orders"])
+    all_order_logs = None
+    if file_ts_prefix is not None:
+        log_files = get_all_logs_files(machine_id=machine_id, date_ts=file_ts_prefix)
+
+        all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=log_files)
 
     motors = dict()
     motor_names = [
@@ -215,23 +384,23 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     for motor in motor_names:
         # Compose keys for each metric
         velocity = {
-            "time": start_order.get(f"{motor}_velocity_time", list()),
-            "value": start_order.get(f"{motor}_velocity_value", list())
+            "time": order_telemetry.get(f"{motor}_velocity_time", list()),
+            "value": order_telemetry.get(f"{motor}_velocity_value", list())
         }
         position = {
-            "time": start_order.get(f"{motor}_position_time", list()),
-            "value": start_order.get(f"{motor}_position_value", list())
+            "time": order_telemetry.get(f"{motor}_position_time", list()),
+            "value": order_telemetry.get(f"{motor}_position_value", list())
         }
         state = {
-            "time": start_order.get(f"{motor}_state_time", list()),
-            "value": start_order.get(f"{motor}_state_value", list())
+            "time": order_telemetry.get(f"{motor}_state_time", list()),
+            "value": order_telemetry.get(f"{motor}_state_value", list())
         }
         # Optional weight sensor (e.g., for screen)
         weight = None
-        if f"{motor}_weight_time" in start_order and f"{motor}_weight_value" in start_order:
+        if f"{motor}_weight_time" in order_telemetry and f"{motor}_weight_value" in order_telemetry:
             weight = {
-                "time": start_order.get(f"{motor}_weight_time", list()),
-                "value": start_order.get(f"{motor}_weight_value", list())
+                "time": order_telemetry.get(f"{motor}_weight_time", list()),
+                "value": order_telemetry.get(f"{motor}_weight_value", list())
             }
         # Only add weight if present and non-empty
         if weight and (weight["time"] or weight["value"]):
@@ -253,8 +422,9 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     try:
         order_telemetry = OrderTelemetry(
             order_id=str(order_id),
-            start_time=start_order.get("start_time", 0.0),
-            end_time=start_order.get("end_time", 0.0),
+            start_time=order_telemetry.get("start_time", 0.0),
+            end_time=end_order_ts,
+            logs=all_order_logs or dict(),
             video_path=video_url if video_url else "",
             motors=motors
         )
