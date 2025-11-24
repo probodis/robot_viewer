@@ -1,14 +1,12 @@
-FROM node:20-slim AS build
+FROM node:22-slim
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 
 COPY . .
-RUN npm run build
 
-# image that only contains /app/dist
-FROM alpine:3.18 AS dist
-WORKDIR /dist
-COPY --from=build /app/dist .
+EXPOSE 5173
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

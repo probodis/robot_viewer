@@ -66,6 +66,33 @@ To get the application up and running, follow these steps:
     * The **frontend** will be available at [http://localhost:5173/robot_viewer/](http://localhost:5173/robot_viewer/).
     * The **backend** API will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
 
+## Server Deployment
+
+1. **Nginx Configuration:**
+
+    Add the following to your Nginx config:
+
+    ```
+    location = /robot_viewer {
+        return 301 /robot_viewer/;
+    }
+
+    location /robot_viewer/ {
+        alias /var/www/robot_viewer/;
+        try_files $uri $uri/ /robot_viewer/index.html;
+        index index.html;
+    }
+    ```
+
+    This configuration makes sure that requests to `/robot_viewer` are redirected to `/robot_viewer/`, and serves the frontend files from `/var/www/robot_viewer/`.
+
+2. **Deploy the Application:**
+
+    Run the deployment with:
+
+    ```bash
+    make deploy
+    ```
 ---
 
 ## Future Improvements

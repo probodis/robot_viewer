@@ -11,13 +11,4 @@ services:
       - /home/ubuntu/logs/robot_viewer/:/logs
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-  frontend:
-    build:
-      context: ./frontend
-      target: dist
-    volumes:
-      - frontend_dist:/dist
-    command: ["/bin/sh", "-c", "cp -r ./* /dist"]
-
-volumes:
-  frontend_dist:
+  # frontend: deploy by make deploy command

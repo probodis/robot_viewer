@@ -1,8 +1,0 @@
-services:
-  backend:
-    env_file:
-      - .env.local
-    volumes:
-      - ./backend:/app
-      - C:\Users\ProBoDiS\xcubes\:/data:ro
-      - C:\Users\ProBoDiS\logs\robot_viewer/:/logs
