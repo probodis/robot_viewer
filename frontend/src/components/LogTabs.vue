@@ -10,7 +10,7 @@
         role="tab"
         :aria-selected="activeTab === filename"
       >
-        {{ basename(filename) }}
+        {{ filename }}
       </button>
     </div>
 

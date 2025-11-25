@@ -73,48 +73,31 @@ PROCESSED_DATA_DIR = DATA_DIR / "processed_data"
 ORDERS_DIR = DATA_DIR / "orders"
 START_ORDER_DIR = DATA_DIR / "start_order"
 
-def get_all_logs_files(machine_id: str, date_ts: str) -> dict[str, Path]:
-    """
-    Return all log files in subfolders of base_dir whose names start with the given date and end with .txt or .txt.gz.
-    Prefer .txt.gz over .txt if both exist.
 
+def parse_timestamp(line: str, offset_h: float = 0) -> float | None:
+    """
+    Return parsed timestamp as float seconds (naive → UTC naive).
+    
     Args:
-        machine_id (str): Machine identifier.
-        date_ts (str): Date string in 'YYYY-MM-DD' format.
-
-    Returns:
-        dict[str, Path]: Mapping from relative file path (str) to Path object.
+        line (str): Log line to parse.
+        offset_h (float): Offset in hours to apply to the parsed timestamp.
     """
-    # Accept date_ts as string and use isoformat directly for prefix
-    result: dict[str, Path] = dict()
-    base_dir = DATA_DIR / machine_id / "logs"
-    date_prefix = f"{date_ts}_"
-
-    # Walk through all subfolders in base_dir
-    for subfolder in base_dir.glob("*"):
-        if not subfolder.is_dir():
-            continue
-
-        # Find all .txt and .txt.gz files with the correct prefix
-        txt_files = list(subfolder.glob(f"{date_prefix}*.txt"))
-        gz_files = list(subfolder.glob(f"{date_prefix}*.txt.gz"))
-
-        # Build a set of base filenames (without .gz) for deduplication
-        gz_basenames = set(f.with_suffix("").name for f in gz_files)
-
-        # Add .txt.gz files first (preferred)
-        for gz_file in gz_files:
-            key = str(gz_file.relative_to(base_dir))
-            result[key] = gz_file
-
-        # Add .txt files only if there is no corresponding .txt.gz
-        for txt_file in txt_files:
-            if txt_file.name in gz_basenames:
-                continue  # Skip if .txt.gz exists
-            key = str(txt_file.relative_to(base_dir))
-            result[key] = txt_file
-
-    return result
+    # Regex patterns for timestamps:
+    #   [YYYY-MM-DD HH:MM:SS]
+    #   YYYY-MM-DD HH:MM:SS(.sss)
+    ts_pattern = re.compile(r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]?")
+    
+    m = ts_pattern.match(line)
+    if m:
+        ts_str = m.group(1)
+        # try microseconds first
+        try:
+            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        # naive datetime → timestamp (still naive)
+        return dt.timestamp() - offset_h * 3600.0
+    return None
 
 
 def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[str, Path]) -> dict[str, dict[str, str]]:
@@ -133,40 +116,12 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
     window_end = end_order_ts + 5.0
 
     result: dict[str, dict[str, str]] = dict()
-
-    # Regex patterns for timestamps:
-    #   [YYYY-MM-DD HH:MM:SS]
-    #   YYYY-MM-DD HH:MM:SS(.sss)
-    ts_patterns = [
-        re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"),
-        re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)")
-    ]
-
-    def parse_timestamp(line: str) -> float | None:
-        """Return parsed timestamp as float seconds (naive → UTC naive)."""
-        for pat in ts_patterns:
-            m = pat.match(line)
-            if m:
-                ts_str = m.group(1)
-                # try microseconds first
-                try:
-                    dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
-                except ValueError:
-                    try:
-                        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                    except ValueError:
-                        return None
-                # naive datetime → timestamp (still naive)
-                return dt.timestamp()
-        return None
-
     for rel_path, file_path in log_files.items():
         lines_in_window = list()
         last_ts: float | None = None
         found_any_ts = False
 
-        # time offset for this file (difference between file local time and UTC)
-        file_offset: float | None = None
+        offset_h = -8.0 if rel_path.startswith("subapps/") else 0.0
 
         if str(file_path).endswith(".gz"):
             open_func = lambda: gzip.open(file_path, "rt", encoding="utf-8")
@@ -177,25 +132,17 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
             with open_func() as f:
                 for line in f:
                     # Try to parse timestamp from this line
-                    ts_local = parse_timestamp(line)
+                    ts_utc = parse_timestamp(line=line, offset_h=offset_h)
 
-                    if ts_local is not None:
+                    if ts_utc is not None:
                         found_any_ts = True
 
-                        # Detect timezone offset using the first timestamp in this file
-                        if file_offset is None:
-                            # Very simple timezone detection:
-                            # Compare the first log timestamp with expected order_id time.
-                            # file_offset = (local time in file) - (UTC time)
-                            file_offset = ts_local - order_id
-
-                        # Convert file-local timestamp to UTC-corrected timestamp
-                        ts_corrected = ts_local - file_offset
-                        last_ts = ts_corrected
+                        last_ts = ts_utc
 
                     # Use last found timestamp for lines without timestamps
                     if last_ts is not None and window_start <= last_ts <= window_end:
                         lines_in_window.append(line)
+                        
                     elif last_ts is not None and last_ts > window_end:
                         # We passed the end of the window, stop reading the file
                         break
@@ -214,48 +161,50 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
     return result
 
 
-def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path] | None:
+def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path]:
     """
-    Search for suitable orders and start_order files for machine_id and timestamp.
+    Search for all suitable log files for a machine up to a given timestamp.
+    Returns a dict with keys as relative paths from machine_id/logs and values as Path objects.
+    For each subdirectory and suffix, only the latest file <= target_date is returned.
     """
     start_time = time.perf_counter()
     dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    date_ts = dt.date()
-    orders_dir = DATA_DIR / machine_id / "logs" / "orders"
-    start_order_dir = DATA_DIR / machine_id / "logs" / "start_order"
-    logger.info(f"Searching files for machine_id={machine_id} and date={date_ts}, orders_dir={orders_dir}, start_order_dir={start_order_dir}")
+    target_date = dt.date()
 
-    def find_file(dir_path: Path, prefix: str):
-        files = sorted(
-            [f for f in dir_path.glob(f"*_{prefix}.txt*") if f.is_file()],
-            key=lambda f: f.name,
-            reverse=True
-        )
-        logger.debug(f"Found {len(files)} files in {dir_path} for prefix={prefix}")
-        for f in files:
-            match = re.match(r"(\d{4}-\d{2}-\d{2})_" + prefix + r"\.txt(\.gz)?$", f.name)
-            if match:
-                file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
-                logger.debug(f"Checking file {f} with date {file_date} against target date {date_ts}")
-                if file_date <= date_ts:
-                    
-                    end_time = time.perf_counter()
-                    logger.info(f"step=find_suitable_files status=completed duration={end_time - start_time:.3f}s")
-                    return f
-        end_time = time.perf_counter()
-        logger.info(f"step=find_suitable_files status=completed duration={end_time - start_time:.3f}s")
-        return None
+    logs_base = DATA_DIR / machine_id / "logs"
+    result: dict[str, Path] = {}
 
-    orders_file = find_file(orders_dir, "orders")
-    start_order_file = find_file(start_order_dir, "start_order")
+    logger.info(f"Searching files for machine_id={machine_id} and date={target_date}, logs_base={logs_base}")
 
-    if orders_file and start_order_file:
-        logger.info(f"Found files: orders_file={orders_file}, start_order_file={start_order_file}, duration={time.perf_counter() - start_time:.3f}s")
-        return {"orders": orders_file, "start_order": start_order_file}
-    
-    logger.warning(f"No suitable orders_file and start_order_file found for machine_id={machine_id} and date={date_ts}, duration={time.perf_counter() - start_time:.3f}s")
+    # Iterate over all subdirectories of logs_base
+    for subdir in [d for d in logs_base.iterdir() if d.is_dir()]:
+        latest_files: dict[str, Path] = {}  # suffix -> Path
+        for file_path in sorted(subdir.iterdir(), reverse=True):
+            if not file_path.is_file():
+                continue
 
-    return None
+            # Match pattern: YYYY-MM-DD_suffix.txt or YYYY-MM-DD_suffix.txt.gz
+            match = re.match(r"(\d{4}-\d{2}-\d{2})_(.+)\.txt(\.gz)?$", file_path.name)
+            if not match:
+                continue
+
+            file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            suffix = match.group(2)
+
+            if file_date <= target_date and suffix not in latest_files:
+                latest_files[suffix] = file_path
+                logger.debug(f"Adding file {file_path} for suffix {suffix}")
+
+        # Add found files to the result dict with relative path as key
+        for f in latest_files.values():
+            rel_path = f.relative_to(logs_base)
+            result[str(rel_path)] = f
+
+    end_time = time.perf_counter()
+    logger.info(f"step=find_suitable_files status=completed duration={end_time - start_time:.3f}s, found {len(result)} files")
+
+    return result
+
 
 def fetch_telemetry_data(order_id: float, file: Path) -> dict[str, Any] | None:
     """
@@ -332,20 +281,17 @@ def find_video_file(machine_id: str, order_id: float) -> str | None:
     return None
 
 
-def extract_date_prefix(file_path: Path) -> str | None:
+def get_telemetry_file_path(files: dict[str, Path]) -> Path | None:
     """
-    Extracts the date prefix (YYYY-MM-DD) from any file path in the logs directory, not just _orders files.
-
+    Get the telemetry file path from the files dictionary.
     Args:
-        file_path (Path): Path to the log file.
-
+        files (dict[str, Path]): Mapping from relative file path to Path object.
     Returns:
-        str | None: Extracted date prefix or None if not found.
+        Path | None: Path to telemetry file or None if not found.
     """
-    # Accepts any file with a YYYY-MM-DD_ prefix in its name
-    match = re.match(r".*/(\d{4}-\d{2}-\d{2})_.*\.txt(\.gz)?$", str(file_path))
-    if match:
-        return match.group(1)
+    for rel_path, path in files.items():
+        if rel_path.endswith("_start_order.txt") or rel_path.endswith("_start_order.txt.gz"):
+            return path
     return None
 
 
@@ -358,8 +304,11 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
         return None
     
     # fetch_all_text_logs(machine_id)
-
-    order_telemetry = fetch_telemetry_data(order_id, files["start_order"])
+    telemetry_file = get_telemetry_file_path(files)
+    if telemetry_file is None:
+        logger.warning(f"No start_order telemetry file found for machine_id={machine_id}, order_id={order_id}")
+        return None
+    order_telemetry = fetch_telemetry_data(order_id, telemetry_file)
     if not order_telemetry:
         logger.warning(f"No start_order data found for machine_id={machine_id}, order_id={order_id}")
         return None
@@ -370,12 +319,7 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
 
     end_order_ts = order_telemetry.get("end_time", 0.0)
 
-    file_ts_prefix = extract_date_prefix(files["orders"])
-    all_order_logs = None
-    if file_ts_prefix is not None:
-        log_files = get_all_logs_files(machine_id=machine_id, date_ts=file_ts_prefix)
-
-        all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=log_files)
+    all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=files)
 
     motors = dict()
     motor_names = [
