@@ -406,6 +406,51 @@ def get_order_telemetry(machine_id: str, order_id: float):
     return order_data
 
 
+@app.get("/api/v1/log")
+def get_log_file(machine_id: str, log_key: str):
+    """
+    Returns the content of a specific log file for a machine.
+    Args:
+        machine_id (str): Machine identifier.
+        log_key (str): Relative path to the log file.
+    Returns:
+        dict: Log file content encoded in base64.
+    """
+    start_time = time.perf_counter()
+    logger.info(f"API request: /api/v1/logs/ machine_id={machine_id}, log_key={log_key}")
+
+    log_file_path = DATA_DIR / machine_id / "logs" / log_key
+    if not log_file_path.exists() or not log_file_path.is_file():
+        logger.error(f"Log file '{log_key}' not found for machine_id={machine_id}, duration={time.perf_counter() - start_time:.3f}s")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Log file '{log_key}' not found for machine '{machine_id}'."
+        )
+
+    try:
+        if str(log_file_path).endswith('.gz'):
+            with gzip.open(log_file_path, "rt", encoding="utf-8") as f:
+                content = f.read()
+        else:
+            with log_file_path.open("r", encoding="utf-8") as f:
+                content = f.read()
+        
+        encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
+
+        total_time = time.perf_counter() - start_time
+        logger.info(f"Log file '{log_key}' returned for machine_id={machine_id}, duration={total_time:.3f}s")
+        return {
+            "path": str(log_file_path),
+            "text": encoded_content
+        }
+    except Exception as e:
+        logger.error(f"Error reading log file '{log_key}' for machine_id={machine_id}, duration={time.perf_counter() - start_time:.3f}s: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error reading log file '{log_key}' for machine '{machine_id}'."
+        )
+
+
 @app.get("/api/v1/version")
 def get_version():
     """

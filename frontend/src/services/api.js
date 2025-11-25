@@ -16,6 +16,8 @@ export default {
   getOrderData: (machineId, orderId) =>
     apiClient.get(`/v1/orders/`, { params: { machine_id: machineId, order_id: orderId } }),
 
+  getLogFile: (machineId, logKey) =>
+    apiClient.get(`/v1/log`, { params: { machine_id: machineId, log_key: logKey } }),
   /**
    * Fetch backend version info.
    * @returns {Promise} Axios response promise

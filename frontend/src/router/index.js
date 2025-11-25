@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import RobotViewer from '../views/RobotViewer.vue'
+const LogFileView = () => import('../views/LogFileView.vue')
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -16,6 +17,11 @@ const router = createRouter({
     {
       path: '/',
       redirect: '/robot_viewer'
+    },
+    {
+      path: '/logfile',
+      name: 'logfile-view',
+      component: LogFileView
     }
   ]
 })

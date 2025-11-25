@@ -7,8 +7,10 @@
         :key="filename"
         :class="['tab', { active: activeTab === filename }]"
         @click="activeTab = filename"
+        @dblclick="() => openLogFile(filename)"
         role="tab"
         :aria-selected="activeTab === filename"
+        title="Double-click to open full log file"
       >
         {{ filename }}
       </button>
@@ -22,7 +24,8 @@
 </template>
 
 <script setup>
-import { ref, watch, computed } from "vue";
+import { ref, watch, computed } from "vue"
+import { useRouter, useRoute } from "vue-router"
 
 const props = defineProps({
   logs: {
@@ -31,38 +34,55 @@ const props = defineProps({
   }
 });
 
-const activeTab = ref(null);
+const activeTab = ref(null)
+const router = useRouter()
+const route = useRoute()
 
 const decodedLogs = computed(() => {
-  const result = {};
+  const result = {}
   for (const [filename, entry] of Object.entries(props.logs || {})) {
     // defensive: entry may be null / missing text
     try {
       result[filename] = entry?.text ? atob(entry.text) : "";
     } catch (e) {
-
-      result[filename] = entry?.text ?? "";
+      result[filename] = entry?.text ?? ""
     }
   }
-  return result;
-});
+  return result
+})
 
 watch(
   () => props.logs,
   (logs) => {
     if (logs && Object.keys(logs).length > 0) {
-      activeTab.value = Object.keys(logs)[0];
+      activeTab.value = Object.keys(logs)[0]
     } else {
-      activeTab.value = null;
+      activeTab.value = null
     }
   },
   { immediate: true }
-);
+)
 
-function basename(path) {
-  if (!path) return "";
-  const parts = path.split("/");
-  return parts[parts.length - 1];
+/**
+ * Opens the log file in a new browser tab/window.
+ *
+ * @param {string} key - The log file key to open.
+ */
+function openLogFile(key) {
+    // Build the target route location using current machine_id and log_key
+    const machine_id = route.query.machine_id || "";
+
+    // Generate the URL using the router's resolve method
+    const location = router.resolve({
+        name: "logfile-view",
+        query: {
+            machine_id,
+            log_key: key
+        }
+    });
+
+    // Open the resolved URL in a new browser tab
+    window.open(location.href, "_blank");
 }
 </script>
 
