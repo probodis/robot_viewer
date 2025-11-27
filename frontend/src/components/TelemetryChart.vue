@@ -140,11 +140,11 @@ const chartOption = computed(() => {
         width: 2,
       },
       label: { show: false },
-      data: [], // не зависит от currentTime!
+      data: [], // does not depend on currentTime!
     },
   }
 
-  // Добавляем dataZoom только для графика Weight
+  // Add dataZoom only for the Weight chart
   const isWeightChart = props.title && props.title.toLowerCase().includes('weight')
   const option = {
     title: {
@@ -164,7 +164,7 @@ const chartOption = computed(() => {
       },
     },
     grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
-    xAxis: { type: 'value', name: 'Время (с)', axisLabel: { formatter: '{value} s' } },
+    xAxis: { type: 'value', name: 'Time (s)', axisLabel: { formatter: '{value} s' } },
     yAxis: {
       type: props.yAxisType,
       data: props.yAxisType === 'category' ? allCategoryValues.value : undefined,
@@ -183,11 +183,11 @@ const chartOption = computed(() => {
         dataZoom: {
           yAxisIndex: 'all',
           title: {
-            zoom: 'Масштабировать по Y',
-            back: 'Сбросить масштаб'
+            zoom: 'Zoom Y',
+            back: 'Reset zoom'
           }
         },
-        restore: { title: 'Сбросить' }
+        restore: { title: 'Reset' }
       },
       right: 20
     }
@@ -221,13 +221,13 @@ const chartOption = computed(() => {
   return option
 })
 
-// Обновляем только markLine при изменении currentTime, чтобы не сбрасывать dataZoom
+// Update only markLine when currentTime changes, to avoid resetting dataZoom
 import { nextTick } from 'vue'
 watch(() => props.currentTime, (newTime) => {
   nextTick(() => {
     const chart = chartComponentRef.value && chartComponentRef.value.getEchartsInstance && chartComponentRef.value.getEchartsInstance()
     if (chart) {
-      // Обновляем только markLine у нужной серии, не трогая остальные опции
+      // Update only markLine for the required series, do not touch other options
       chart.setOption({
         series: chart.getOption().series.map(s =>
           s.name === '__MARKLINE_HOST__'

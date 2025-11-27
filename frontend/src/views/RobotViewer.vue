@@ -31,7 +31,7 @@
 
     <div v-if="orderData">
       <div class="main-content">
-        <!-- Левая колонка: только видео -->
+        <!-- Left column: video only -->
         <div class="left-column">
           <div class="video-section">
             <h3>Order Video: {{ orderData.order_id }}</h3>
@@ -48,7 +48,7 @@
           </div>
         </div>
 
-        <!-- Правая колонка: графики -->
+        <!-- Right column: charts -->
         <div class="charts-section">
           <h3>Telemetry Charts</h3>
 
@@ -84,7 +84,7 @@
         </div>
       </div>
 
-      <!-- Логи под обеими колонками -->
+      <!-- Logs below both columns -->
       <div class="logs-section-below">
         <h3>Logs</h3>
         <LogTabs v-if="orderData?.logs" :logs="orderData.logs" />
@@ -92,7 +92,7 @@
     </div>
 
     <div v-else-if="isLoading">
-      <p>Загрузка данных...</p>
+      <p>Loading data...</p>
     </div>
 
     <div v-else>

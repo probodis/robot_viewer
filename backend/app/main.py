@@ -121,12 +121,15 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
         last_ts: float | None = None
         found_any_ts = False
 
-        offset_h = -8.0 if rel_path.startswith("subapps/") else 0.0
+        offset_prefixes = ["subapps/", "console/"]
+        offset_h = -8.0 if any(rel_path.startswith(prefix) for prefix in offset_prefixes) else 0.0
 
         if str(file_path).endswith(".gz"):
             open_func = lambda: gzip.open(file_path, "rt", encoding="utf-8")
         else:
             open_func = lambda: file_path.open("r", encoding="utf-8")
+
+        logger.info(f"Extracting log window from {file_path} for order_id={order_id}, window=({window_start}, {window_end}), offset_h={offset_h}")
 
         try:
             with open_func() as f:
@@ -149,12 +152,22 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
 
             if found_any_ts and lines_in_window:
                 text = "".join(lines_in_window)
-                encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-                result[rel_path] = {
-                    "path": str(file_path),
-                    "text": encoded_text
-                }
-
+                
+                logger.info(f"Extracted {len(lines_in_window)} lines from {file_path} for order_id={order_id}")
+            else:
+                # No lines in window, show fallback message
+                text = (
+                    "=== No time window found in this file ===\n"
+                    "To open full file, double-click the tab.\n"
+                )
+                logger.info(f"No window found in {file_path} for order_id={order_id}, fallback message returned")
+            
+            encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            result[rel_path] = {
+                "path": str(file_path),
+                "text": encoded_text
+            }
+            
         except Exception as e:
             logger.error(f"Failed to extract log window from {file_path}: {e}")
 
@@ -320,6 +333,7 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     end_order_ts = order_telemetry.get("end_time", 0.0)
 
     all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=files)
+    all_order_logs = dict(sorted(all_order_logs.items()))
 
     motors = dict()
     motor_names = [
