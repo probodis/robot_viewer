@@ -110,14 +110,15 @@ const allCategoryValues = computed(() => {
 
 const chartOption = computed(() => {
   // 1. Create visible series from chart data
+  const isWeightChart = props.title && props.title.toLowerCase().includes("weight")
   const dataSeries = props.chartData.map((seriesItem) => {
     const data = seriesItem.data.time.map((t, i) => [t, seriesItem.data.value[i]])
     return {
       name: seriesItem.name,
       data: data,
       type: 'line',
-      step: props.yAxisType === 'category' ? 'start' : false, // Step chart for states
-      showSymbol: false,
+      step: props.yAxisType === 'category' ? 'start' : false,
+      showSymbol: isWeightChart, // show points only for Weight chart
       animation: false,
       lineStyle: { width: 2 },
       itemStyle: { color: colorMap[seriesItem.name] || colorMap.default },
@@ -145,7 +146,6 @@ const chartOption = computed(() => {
   }
 
   // Add dataZoom only for the Weight chart
-  const isWeightChart = props.title && props.title.toLowerCase().includes('weight')
   const option = {
     title: {
       text: props.title,
