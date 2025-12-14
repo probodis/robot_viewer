@@ -66,6 +66,13 @@ To get the application up and running, follow these steps:
     * The **frontend** will be available at [http://localhost:5173/robot_viewer/](http://localhost:5173/robot_viewer/).
     * The **backend** API will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
 
+## Development
+To run the application in development mode, follow these steps:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
 ## Server Deployment
 
 1. **Nginx Configuration:**
