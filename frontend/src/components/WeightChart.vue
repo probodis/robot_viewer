@@ -56,19 +56,19 @@ const chartOption = computed(() => ({
   xAxis: { type: 'value', name: 'Time (s)' },
   yAxis: { type: 'value', name: 'Weight', scale: true },
   grid: { left: '5%', right: '5%', bottom: '23%' },
-  legend: { data: ['Weight', 'Other sensors'], bottom: 40 },
+  legend: { data: ['Weight', 'Extra Points'], bottom: 40 },
 
   series: [
     {
       name: 'Weight',
       type: 'line',
       data: props.weightData.time.map((t, i) => [t, props.weightData.value[i]]),
-      symbolSize: 2,
+      symbolSize: 1,
       lineStyle: { width: 2 },
       itemStyle: { color: '#E83E8C' }
     },
     {
-      name: 'Other sensors',
+      name: 'Extra Points',
       type: 'scatter',
       data: props.extraPoints.map(p => [p.time, p.value, p.name]),
       symbolSize: 10,

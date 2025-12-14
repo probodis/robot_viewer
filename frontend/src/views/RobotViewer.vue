@@ -52,33 +52,34 @@
         <div class="charts-section">
           <h3>Telemetry Charts</h3>
 
-          <TelemetryChart
+          <WeightChart
             v-if="weightSeries.length > 0"
             title="Weight (grams)"
-            :chart-data="weightSeries"
-            :current-time="syncedTime"
+            :weightData="weightSeries[0].data"
+            :extraPoints="weightExtraPoints"
+            :currentTime="syncedTime"
             @time-updated="handleChartTimeUpdate"
           />
 
           <TelemetryChart
             title="Velocity"
-            :chart-data="velocitySeries"
-            :current-time="syncedTime"
+            :chartData="velocitySeries"
+            :currentTime="syncedTime"
             @time-updated="handleChartTimeUpdate"
           />
 
           <TelemetryChart
             title="Position"
-            :chart-data="positionSeries"
-            :current-time="syncedTime"
+            :chartData="positionSeries"
+            :currentTime="syncedTime"
             @time-updated="handleChartTimeUpdate"
           />
 
           <TelemetryChart
             title="State"
-            :chart-data="stateSeries"
-            :current-time="syncedTime"
-            y-axis-type="category"
+            :chartData="stateSeries"
+            :currentTime="syncedTime"
+            yAxisType="category"
             @time-updated="handleChartTimeUpdate"
           />
         </div>
@@ -111,7 +112,8 @@ import { useRouter, useRoute } from 'vue-router'
 import { version as frontendVersion } from '../../package.json'
 import api from '../services/api'
 import TelemetryChart from '../components/TelemetryChart.vue'
-import LogTabs from '../components/LogTabs.vue' // <-- импорт компонента
+import WeightChart from '../components/WeightChart.vue'
+import LogTabs from '../components/LogTabs.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -204,6 +206,13 @@ const weightSeries = computed(() => {
   const screenMotor = orderData.value.motors.screen
   if (screenMotor && screenMotor.weight) series.push({ name: 'weight', data: screenMotor.weight })
   return series
+})
+
+const weightExtraPoints = computed(() => {
+  if (!orderData.value || !orderData.value.extra_weight_points) return []
+
+  // extra_weight_points is expected to be a list of { name, time, value }
+  return orderData.value.extra_weight_points
 })
 
 function handleVideoTimeUpdate(event) {

@@ -16,11 +16,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas.telemetry import OrderTelemetry
+from app.utils import open_text
+from app.constants import DATA_DIR, LOGS_DIR
+from app.strategies.order_strategy import OrdersStrategy
+from app.strategies.sauce_weight_strategy import SauceWeightStrategy
+from app.infrastructure.filesystem.file_finder import find_suitable_files
+from app.infrastructure.filesystem.file_selectors import TelemetryFileSelector, OrderFileSelector, SauceWeightFileSelector
 from ._version import __version__ as backend_version
 
 
 # Setup logging to file with daily rotation and custom filename format
-LOGS_DIR = Path("/logs")
+
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 class CustomDailyFileHandler(TimedRotatingFileHandler):
@@ -66,12 +72,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
-
-DATA_DIR = Path("/data")
-PROCESSED_DATA_DIR = DATA_DIR / "processed_data"
-
-ORDERS_DIR = DATA_DIR / "orders"
-START_ORDER_DIR = DATA_DIR / "start_order"
 
 
 def parse_timestamp(line: str, offset_h: float = 0) -> float | None:
@@ -124,15 +124,10 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
         offset_prefixes = ["subapps/", "console/"]
         offset_h = -8.0 if any(rel_path.startswith(prefix) for prefix in offset_prefixes) else 0.0
 
-        if str(file_path).endswith(".gz"):
-            open_func = lambda: gzip.open(file_path, "rt", encoding="utf-8")
-        else:
-            open_func = lambda: file_path.open("r", encoding="utf-8")
-
         logger.info(f"Extracting log window from {file_path} for order_id={order_id}, window=({window_start}, {window_end}), offset_h={offset_h}")
 
         try:
-            with open_func() as f:
+            with open_text(file_path) as f:
                 for line in f:
                     # Try to parse timestamp from this line
                     ts_utc = parse_timestamp(line=line, offset_h=offset_h)
@@ -174,51 +169,6 @@ def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[s
     return result
 
 
-def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path]:
-    """
-    Search for all suitable log files for a machine up to a given timestamp.
-    Returns a dict with keys as relative paths from machine_id/logs and values as Path objects.
-    For each subdirectory and suffix, only the latest file <= target_date is returned.
-    """
-    start_time = time.perf_counter()
-    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    target_date = dt.date()
-
-    logs_base = DATA_DIR / machine_id / "logs"
-    result: dict[str, Path] = {}
-
-    logger.info(f"Searching files for machine_id={machine_id} and date={target_date}, logs_base={logs_base}")
-
-    # Iterate over all subdirectories of logs_base
-    for subdir in [d for d in logs_base.iterdir() if d.is_dir()]:
-        latest_files: dict[str, Path] = {}  # suffix -> Path
-        for file_path in sorted(subdir.iterdir(), reverse=True):
-            if not file_path.is_file():
-                continue
-
-            # Match pattern: YYYY-MM-DD_suffix.txt or YYYY-MM-DD_suffix.txt.gz
-            match = re.match(r"(\d{4}-\d{2}-\d{2})_(.+)\.txt(\.gz)?$", file_path.name)
-            if not match:
-                continue
-
-            file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
-            suffix = match.group(2)
-
-            if file_date <= target_date and suffix not in latest_files:
-                latest_files[suffix] = file_path
-                logger.debug(f"Adding file {file_path} for suffix {suffix}")
-
-        # Add found files to the result dict with relative path as key
-        for f in latest_files.values():
-            rel_path = f.relative_to(logs_base)
-            result[str(rel_path)] = f
-
-    end_time = time.perf_counter()
-    logger.info(f"step=find_suitable_files status=completed duration={end_time - start_time:.3f}s, found {len(result)} files")
-
-    return result
-
-
 def fetch_telemetry_data(order_id: float, file: Path) -> dict[str, Any] | None:
     """
     Fetch telemetry data for a given order_id from a file.
@@ -233,14 +183,8 @@ def fetch_telemetry_data(order_id: float, file: Path) -> dict[str, Any] | None:
     tolerance = 3.0
     pattern = re.compile(r"'start_time':\s*([\d]+\.[\d]+|[\d]+)")
 
-    # Determine if the file is gzipped or plain text
-    if str(file).endswith('.gz'):
-        open_func = lambda: gzip.open(file, "rt", encoding="utf-8")
-    else:
-        open_func = lambda: file.open("r", encoding="utf-8")
-
     try:
-        with open_func() as f:
+        with open_text(file) as f:
             for line in f:
                 match = pattern.search(line)
                 if match:
@@ -294,20 +238,6 @@ def find_video_file(machine_id: str, order_id: float) -> str | None:
     return None
 
 
-def get_telemetry_file_path(files: dict[str, Path]) -> Path | None:
-    """
-    Get the telemetry file path from the files dictionary.
-    Args:
-        files (dict[str, Path]): Mapping from relative file path to Path object.
-    Returns:
-        Path | None: Path to telemetry file or None if not found.
-    """
-    for rel_path, path in files.items():
-        if rel_path.endswith("_start_order.txt") or rel_path.endswith("_start_order.txt.gz"):
-            return path
-    return None
-
-
 def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     start_time = time.perf_counter()
 
@@ -316,17 +246,41 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
         logger.warning(f"No files found for machine_id={machine_id}, order_id={order_id}")
         return None
     
-    # fetch_all_text_logs(machine_id)
-    telemetry_file = get_telemetry_file_path(files)
+    telemetry_file = TelemetryFileSelector().select(files)
     if telemetry_file is None:
         logger.warning(f"No start_order telemetry file found for machine_id={machine_id}, order_id={order_id}")
         return None
+
     order_telemetry = fetch_telemetry_data(order_id, telemetry_file)
     if not order_telemetry:
         logger.warning(f"No start_order data found for machine_id={machine_id}, order_id={order_id}")
         return None
-
     logger.info(f"Found start_order data for order_id={order_id}")
+
+    orders_file = OrderFileSelector().select(files)
+    order_info = None
+    if orders_file:
+        order_strategy = OrdersStrategy()
+        order_info = order_strategy.fetch_order(order_id=order_id, path=orders_file)
+        if order_info:
+            order_telemetry["start_time"] = order_info.start_time.timestamp()
+            order_telemetry["end_time"] = order_info.end_time.timestamp()
+        else:
+            logger.warning(f"No order info found in orders file for machine_id={machine_id}, order_id={order_id}, orders_file={orders_file}")
+    else:
+        logger.warning(f"No orders file found for machine_id={machine_id}, order_id={order_id}")
+
+    sauce_weight_file = SauceWeightFileSelector().select(files)
+    sauce_points = list()
+    if sauce_weight_file and order_info:
+        sauce_strategy = SauceWeightStrategy()
+        sauce_points = sauce_strategy.fetch_points(
+            order=order_info,
+            path=sauce_weight_file,
+            name_prefix="Sauce"
+        )
+        if len(sauce_points) == 0:
+            logger.warning(f"No sauce weight points found in sauce weight file for machine_id={machine_id}, order_id={order_id}, sauce_weight_file={sauce_weight_file}")
 
     video_url = find_video_file(machine_id, order_id)
 
@@ -384,7 +338,8 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
             end_time=end_order_ts,
             logs=all_order_logs or dict(),
             video_path=video_url if video_url else "",
-            motors=motors
+            motors=motors,
+            extra_weight_points=sauce_points
         )
         logger.info(f"OrderTelemetry composed for machine_id={machine_id}, order_id={order_id}, duration={time.perf_counter() - start_time:.3f}s")
         return order_telemetry

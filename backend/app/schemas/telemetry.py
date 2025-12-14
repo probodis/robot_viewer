@@ -23,6 +23,13 @@ class MotorNodeData(BaseModel):
     # The weight sensor is attached to a motor (e.g., 'screen') and is optional.
     weight: Optional[TimeSeriesData[float]] = None
 
+
+class ExtraWeightPoint(BaseModel):
+    name: str
+    time: float  # seconds since order start
+    value: float
+
+
 class OrderTelemetry(BaseModel):
     """The main model that aggregates all telemetry data for a single order."""
     order_id: str = Field(..., description="The unique UTC marker for the order.")
@@ -32,3 +39,7 @@ class OrderTelemetry(BaseModel):
     video_path: str = Field(..., description="The path to the corresponding video file.")
     # All robot components are now stored in a single dictionary.
     motors: Dict[str, MotorNodeData]
+    extra_weight_points: List[ExtraWeightPoint] = Field(
+        default_factory=list,
+        description="Optional list of extra weight points with time, value, and name."
+    )
