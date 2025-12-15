@@ -22,6 +22,7 @@ from app.strategies.order_strategy import OrdersStrategy
 from app.strategies.sauce_weight_strategy import SauceWeightStrategy
 from app.infrastructure.filesystem.file_finder import find_suitable_files
 from app.infrastructure.filesystem.file_selectors import TelemetryFileSelector, OrderFileSelector, SauceWeightFileSelector
+from app.infrastructure.filesystem.log_window_extractor import fetch_all_order_logs
 from ._version import __version__ as backend_version
 
 
@@ -78,12 +79,14 @@ async def log_request_time(request, call_next):
     """
     start_time = time.perf_counter()
     logger.info(f"Request started: method={request.method} url={request.url}")
+    response = None
     try:
         response = await call_next(request)
         return response
     finally:
         duration = time.perf_counter() - start_time
-        logger.info(f"Request finished: method={request.method} url={request.url} duration={duration:.3f}s status_code={getattr(response, 'status_code', 'N/A')}")
+        status_code = getattr(response, 'status_code', 'N/A') if response is not None else 'N/A'
+        logger.info(f"Request finished: method={request.method} url={request.url} duration={duration:.3f}s status_code={status_code}")
 
 # Allow Cross-Origin Resource Sharing (CORS) for the frontend.
 app.add_middleware(
@@ -93,101 +96,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
-
-
-def parse_timestamp(line: str, offset_h: float = 0) -> float | None:
-    """
-    Return parsed timestamp as float seconds (naive → UTC naive).
-    
-    Args:
-        line (str): Log line to parse.
-        offset_h (float): Offset in hours to apply to the parsed timestamp.
-    """
-    # Regex patterns for timestamps:
-    #   [YYYY-MM-DD HH:MM:SS]
-    #   YYYY-MM-DD HH:MM:SS(.sss)
-    ts_pattern = re.compile(r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]?")
-    
-    m = ts_pattern.match(line)
-    if m:
-        ts_str = m.group(1)
-        # try microseconds first
-        try:
-            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-        # naive datetime → timestamp (still naive)
-        return dt.timestamp() - offset_h * 3600.0
-    return None
-
-
-def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: dict[str, Path]) -> dict[str, dict[str, str]]:
-    """
-    Extracts a window of log lines from each file, starting 5 seconds before order_id and ending 5 seconds after end_ts.
-
-    Args:
-        order_id (float): Start timestamp of the order.
-        end_order_ts (float): End timestamp of the order.
-        log_files (dict[str, Path]): Mapping from relative file path to Path object.
-
-    Returns:
-        dict[str, dict[str, str]]: Mapping from relative file path to dict with 'path' and base64-encoded 'text'.
-    """
-    window_start = order_id - 5.0
-    window_end = end_order_ts + 5.0
-
-    result: dict[str, dict[str, str]] = dict()
-    for rel_path, file_path in log_files.items():
-        lines_in_window = list()
-        last_ts: float | None = None
-        found_any_ts = False
-
-        offset_prefixes = ["subapps/", "console/"]
-        offset_h = -8.0 if any(rel_path.startswith(prefix) for prefix in offset_prefixes) else 0.0
-
-        logger.info(f"Extracting log window from {file_path} for order_id={order_id}, window=({window_start}, {window_end}), offset_h={offset_h}")
-
-        try:
-            with open_text(file_path) as f:
-                for line in f:
-                    # Try to parse timestamp from this line
-                    ts_utc = parse_timestamp(line=line, offset_h=offset_h)
-
-                    if ts_utc is not None:
-                        found_any_ts = True
-
-                        last_ts = ts_utc
-
-                    # Use last found timestamp for lines without timestamps
-                    if last_ts is not None and window_start <= last_ts <= window_end:
-                        lines_in_window.append(line)
-                        
-                    elif last_ts is not None and last_ts > window_end:
-                        # We passed the end of the window, stop reading the file
-                        break
-
-            if found_any_ts and lines_in_window:
-                text = "".join(lines_in_window)
-                
-                logger.info(f"Extracted {len(lines_in_window)} lines from {file_path} for order_id={order_id}")
-            else:
-                # No lines in window, show fallback message
-                text = (
-                    "=== No time window found in this file ===\n"
-                    "To open full file, double-click the tab.\n"
-                )
-                logger.info(f"No window found in {file_path} for order_id={order_id}, fallback message returned")
-            
-            encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-            result[rel_path] = {
-                "path": str(file_path),
-                "text": encoded_text
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to extract log window from {file_path}: {e}")
-
-    return result
 
 
 def fetch_telemetry_data(order_id: float, file: Path) -> dict[str, Any] | None:
