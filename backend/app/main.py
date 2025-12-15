@@ -144,26 +144,23 @@ def find_video_file(machine_id: str, order_id: float) -> str | None:
 
     tolerance = 3.0
 
-    s3_videos_folder = Path(f"xcubes/{machine_id}/logs/videos/")
-    video_files = s3_client.list_files_in_folder(s3_videos_folder)
+    # Generate possible timestamps within tolerance window
+    possible_timestamps = [order_id + offset for offset in range(-int(tolerance), int(tolerance) + 1)]
+    checked_files = list()
+    for ts in possible_timestamps:
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        filename = dt.strftime("%Y-%m-%d_%H-%M-%S.mp4")
+        s3_key = Path(f"xcubes/{machine_id}/logs/videos/{filename}")
+        checked_files.append(str(s3_key))
+        try:
+            if s3_client.is_file_exist(s3_key=s3_key):
+                logger.info(f"Found video file for machine_id={machine_id}, order_id={order_id}: {s3_key}, duration={time.perf_counter() - start_time:.3f}s")
+                return s3_client.get_presigned_url(s3_key)
+        except Exception as e:
+            logger.error(f"Error checking video file existence for {s3_key}, duration={time.perf_counter() - start_time:.3f}s: {e}")
+            continue
 
-    for key in sorted(video_files, reverse=True):
-        # file name stamp: YYYY-MM-DD_HH-MM-SS.mp4
-        filename = Path(key).name
-        match = re.match(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.mp4$", filename)
-        if match:
-            dt_str = f"{match.group(1)} {match.group(2)}:{match.group(3)}:{match.group(4)}"
-            try:
-                file_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-                file_ts = file_dt.replace(tzinfo=timezone.utc).timestamp()
-                if abs(file_ts - order_id) <= tolerance:
-                    logger.info(f"Found video file for machine_id={machine_id}, order_id={order_id}: {key}, duration={time.perf_counter() - start_time:.3f}s")
-                    return s3_client.get_presigned_url(Path(key))
-            except Exception as e:
-                logger.error(f"Error parsing video file date for {filename}, duration={time.perf_counter() - start_time:.3f}s: {e}")
-                continue
-    
-    logger.warning(f"No video file found for machine_id={machine_id}, order_id={order_id}, duration={time.perf_counter() - start_time:.3f}s")
+    logger.warning(f"No video file found for machine_id={machine_id}, order_id={order_id}, checked_files={checked_files}, duration={time.perf_counter() - start_time:.3f}s")
     return None
 
 
@@ -232,6 +229,7 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     logger.info(f"Fetching all order logs for machine_id={machine_id}, order_id={order_id}")
     all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=files)
     all_order_logs = dict(sorted(all_order_logs.items()))
+    # all_order_logs = dict()
     logger.info(f"Fetched {len(all_order_logs)} log files for machine_id={machine_id}, order_id={order_id}")
 
     logger.info(f"Composing motors data for machine_id={machine_id}, order_id={order_id}")

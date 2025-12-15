@@ -1,8 +1,7 @@
 import logging
 import base64
 from pathlib import Path
-from multiprocessing import Process, Queue
-from typing import Dict, TypedDict
+from typing import Dict, Iterator, TypedDict
 from app.utils import open_text
 from datetime import datetime, timezone
 import re
@@ -10,52 +9,13 @@ import re
 
 logger = logging.getLogger("robot_viewer")
 
-MAX_PROCESSES = 2
+TS_PATTERN = re.compile(r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]?")
 
+OFFSET_PREFIXES = ("subapps/", "console/")
 
-class LogWindowResult(TypedDict):
-    rel_path: str
-    path: str
-    text: str
-
-
-def _process_file(file_path: Path, rel_path: str, window_start: float, window_end: float, queue: Queue):
-    try:
-        lines_in_window = []
-        last_ts = None
-        found_any_ts = False
-
-        offset_prefixes = ["subapps/", "console/"]
-        offset_h = -8.0 if any(rel_path.startswith(prefix) for prefix in offset_prefixes) else 0.0
-
-        with open_text(file_path) as f:
-            for line in f:
-                ts_utc = parse_timestamp(line=line, offset_h=offset_h)
-                if ts_utc is not None:
-                    found_any_ts = True
-                    last_ts = ts_utc
-
-                if last_ts is not None and window_start <= last_ts <= window_end:
-                    lines_in_window.append(line)
-                elif last_ts is not None and last_ts > window_end:
-                    break  # прошли окно → выходим
-
-        if found_any_ts and lines_in_window:
-            text = "".join(lines_in_window)
-        else:
-            text = (
-                "=== No time window found in this file ===\n"
-                "To open full file, double-click the tab.\n"
-            )
-
-        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        queue.put((rel_path, {"path": str(file_path), "text": encoded_text}))
-
-    except Exception as e:
-        logger.error(f"Failed to extract log window from {file_path}: {e}")
-        text = f"=== Failed to extract log window: {e} ==="
-        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        queue.put((rel_path, {"path": str(file_path), "text": encoded_text}))
+# Safety limits
+MAX_BYTES_PER_FILE = 10 * 1024 * 1024 # 10 MB hard cap
+MAX_LINES_PER_FILE = 200_000 # absolute line limit
 
 
 def parse_timestamp(line: str, offset_h: float = 0) -> float | None:
@@ -65,72 +25,167 @@ def parse_timestamp(line: str, offset_h: float = 0) -> float | None:
     Args:
         line (str): Log line to parse.
         offset_h (float): Offset in hours to apply to the parsed timestamp.
-    """
-    # Regex patterns for timestamps:
-    #   [YYYY-MM-DD HH:MM:SS]
-    #   YYYY-MM-DD HH:MM:SS(.sss)
-    ts_pattern = re.compile(r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]?")
-    
-    m = ts_pattern.match(line)
-    if m:
-        ts_str = m.group(1)
-        # try microseconds first
-        try:
-            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-        # naive datetime → timestamp (still naive)
-        return dt.timestamp() - offset_h * 3600.0
-    return None
+    """    
+    m = TS_PATTERN.match(line)
+    if not m:
+        return None
+
+    try:
+        dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+    return dt.timestamp() - offset_h * 3600.0
 
 
-def fetch_all_order_logs(order_id: float, end_order_ts: float, log_files: Dict[str, Path]) -> Dict[str, Dict[str, str]]:
-    """
-    Extract log windows for all files related to an order, using multiprocessing for efficiency.
+def iter_lines_with_limits(path: Path) -> Iterator[str]:
+    """Yield lines from file with size and line-count protection."""
+    total_bytes = 0
+    line_count = 0
 
-    Args:
-        order_id (float): Start timestamp of the order.
-        end_order_ts (float): End timestamp of the order.
-        log_files (dict[str, Path]): Mapping of relative log file paths to their absolute Path objects.
+    with open_text(path) as f:
+        for line in f:
+            line_count += 1
+            total_bytes += len(line)
 
-    Returns:
-        dict[str, dict[str, str]]: Mapping of relative paths to extracted log window data.
-    """
+            if line_count > MAX_LINES_PER_FILE:
+                logger.warning(
+                    "level=WARNING module=log_window_extractor func=iter_lines_with_limits "
+                    "msg=Line limit exceeded path=%s lines=%d",
+                    path,
+                    line_count,
+                )
+                break
+
+            if total_bytes > MAX_BYTES_PER_FILE:
+                logger.warning(
+                    "level=WARNING module=log_window_extractor func=iter_lines_with_limits "
+                    "msg=Byte limit exceeded path=%s bytes=%d",
+                    path,
+                    total_bytes,
+                )
+                break
+
+            yield line
+
+
+def extract_log_window(
+    *,
+    file_path: Path,
+    rel_path: str,
+    window_start: float,
+    window_end: float,
+) -> Dict[str, str]:
+    """Extract log lines inside time window using lazy scanning and early exit."""
+
+    offset_h = -8.0 if rel_path.startswith(OFFSET_PREFIXES) else 0.0
+
+    logger.info(
+        "level=INFO module=log_window_extractor func=extract_log_window "
+        "msg=Start rel_path=%s path=%s window=(%s,%s) offset_h=%s",
+        rel_path,
+        file_path,
+        window_start,
+        window_end,
+        offset_h,
+    )
+
+    lines_in_window: list[str] = []
+    last_ts: float | None = None
+    found_any_ts = False
+
+    for line in iter_lines_with_limits(file_path):
+        ts = parse_timestamp(line, offset_h)
+
+        if ts is not None:
+            found_any_ts = True
+            last_ts = ts
+
+            # Early skip: file is entirely before window
+            if last_ts < window_start:
+                continue
+
+            # Early exit: file is already past window
+            if last_ts > window_end:
+                logger.info(
+                    "level=INFO module=log_window_extractor func=extract_log_window "
+                    "msg=Window end reached rel_path=%s",
+                    rel_path,
+                )
+                break
+
+        if last_ts is not None and window_start <= last_ts <= window_end:
+            lines_in_window.append(line)
+
+    if found_any_ts and lines_in_window:
+        text = "".join(lines_in_window)
+        logger.info(
+            "level=INFO module=log_window_extractor func=extract_log_window "
+            "msg=Extracted rel_path=%s lines=%d",
+            rel_path,
+            len(lines_in_window),
+        )
+    else:
+        text = (
+            "=== No time window found in this file ===\n"
+            "To open full file, double-click the tab.\n"
+        )
+        logger.info(
+            "level=INFO module=log_window_extractor func=extract_log_window "
+            "msg=No window found rel_path=%s",
+            rel_path,
+        )
+
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return {"path": str(file_path), "text": encoded}
+
+
+def fetch_all_order_logs(
+    order_id: float,
+    end_order_ts: float,
+    log_files: Dict[str, Path],
+) -> Dict[str, Dict[str, str]]:
+    """Extract log windows for all files sequentially (I/O-optimized)."""
+
     window_start = order_id - 5.0
     window_end = end_order_ts + 5.0
 
-    result: Dict[str, Dict[str, str]] = dict()
-    queue = Queue()
+    logger.info(
+        "level=INFO module=log_window_extractor func=fetch_all_order_logs "
+        "msg=Start order_id=%s window=(%s,%s) files=%d",
+        order_id,
+        window_start,
+        window_end,
+        len(log_files),
+    )
 
-    processes = []
-    for rel_path, file_path in log_files.items():
-        p = Process(target=_process_file, args=(file_path, rel_path, window_start, window_end, queue))
-        processes.append((p, rel_path, file_path))
+    result: Dict[str, Dict[str, str]] = {}
 
-    # Start all processes first to maximize parallelism
-    for p, rel_path, file_path in processes:
-        logger.info(f"level=INFO module=log_window_extractor func=fetch_all_order_logs msg=Starting process for file {rel_path}")
-        p.start()
-
-    # Join all processes with a reasonable timeout
-    join_timeout = 30  # seconds, increase if needed for slow environments
-    for p, rel_path, file_path in processes:
-        p.join(timeout=join_timeout)
-        if p.is_alive():
-            p.terminate()
-            logger.warning(
-                f"level=WARNING module=log_window_extractor func=fetch_all_order_logs msg=Timeout reached for file {rel_path}"
+    for rel_path, path in log_files.items():
+        try:
+            result[rel_path] = extract_log_window(
+                file_path=path,
+                rel_path=rel_path,
+                window_start=window_start,
+                window_end=window_end,
             )
-            text = "=== Timeout reached while extracting log window ==="
-            encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-            result[rel_path] = {"path": str(file_path), "text": encoded_text}
-        else:
-            logger.info(
-                f"level=INFO module=log_window_extractor func=fetch_all_order_logs msg=Process finished for file {rel_path}"
+        except Exception as e:
+            logger.error(
+                "level=ERROR module=log_window_extractor func=fetch_all_order_logs "
+                "msg=Failed rel_path=%s error=%s",
+                rel_path,
+                e,
             )
+            text = f"=== Failed to extract log window: {e} ==="
+            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            result[rel_path] = {"path": str(path), "text": encoded}
 
-    while not queue.empty():
-        rel_path, data = queue.get()
-        result[rel_path] = data
+    logger.info(
+        "level=INFO module=log_window_extractor func=fetch_all_order_logs "
+        "msg=Finished result_count=%d",
+        len(result),
+    )
 
     return result

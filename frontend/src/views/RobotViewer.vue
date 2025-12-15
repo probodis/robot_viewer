@@ -132,9 +132,6 @@ onMounted(async () => {
   try {
     if (route.query.order_id) selectedOrderId.value = route.query.order_id
     if (route.query.machine_id) selectedMachineId.value = route.query.machine_id
-    if (selectedOrderId.value && selectedMachineId.value) {
-      await fetchOrderData(selectedMachineId.value, selectedOrderId.value)
-    }
     const versionResponse = await api.getBackendVersion();
     backendVersion.value = versionResponse.data.version;
   } catch (error) {
