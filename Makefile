@@ -26,3 +26,7 @@ deploy-backend:
 	@echo ">>> Backend deployment finished!"
 
 deploy: update-dev deploy-frontend deploy-backend
+
+checkout:
+	git fetch origin
+	git checkout $(COMMIT)
