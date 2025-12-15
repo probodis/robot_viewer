@@ -26,7 +26,7 @@ class S3Client:
             else None,
             endpoint_url=endpoint_url,
         )
-        self.logger = logging.getLogger("S3Client")
+        self.logger = logging.getLogger("robot_viewer")
 
     def _normalize_key(self, key: str | Path) -> str:
         return str(key).replace("\\", "/")

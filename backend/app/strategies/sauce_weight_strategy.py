@@ -8,7 +8,7 @@ from app.schemas.telemetry import ExtraWeightPoint
 from app.schemas.order import Order
 from app.utils import open_text
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("robot_viewer")
 
 
 class SauceWeightStrategy:

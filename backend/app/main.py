@@ -58,11 +58,32 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+
 app = FastAPI(
     title="Robot Telemetry API",
     description="API for serving pre-processed robot telemetry data and videos.",
     version="1.0.0"
 )
+
+# Middleware to log request start/end and duration for all API calls
+@app.middleware("http")
+async def log_request_time(request, call_next):
+    """
+    Logs the start, end, and duration of each HTTP request for performance monitoring.
+    Args:
+        request: FastAPI request object.
+        call_next: Function to process the request.
+    Returns:
+        Response object from downstream handler.
+    """
+    start_time = time.perf_counter()
+    logger.info(f"Request started: method={request.method} url={request.url}")
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration = time.perf_counter() - start_time
+        logger.info(f"Request finished: method={request.method} url={request.url} duration={duration:.3f}s status_code={getattr(response, 'status_code', 'N/A')}")
 
 # Allow Cross-Origin Resource Sharing (CORS) for the frontend.
 app.add_middleware(
@@ -241,23 +262,30 @@ def find_video_file(machine_id: str, order_id: float) -> str | None:
 def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
     start_time = time.perf_counter()
 
+    logger.info(f"Find suitable files for machine_id={machine_id}, order_id={order_id}")
     files = find_suitable_files(machine_id, order_id)
     if not files:
         logger.warning(f"No files found for machine_id={machine_id}, order_id={order_id}")
         return None
+    logger.info(f"Suitable files found for machine_id={machine_id}, order_id={order_id}: {list(files.keys())}")
     
+    logger.info(f"Selecting telemetry file for machine_id={machine_id}, order_id={order_id}")
     telemetry_file = TelemetryFileSelector().select(files)
     if telemetry_file is None:
         logger.warning(f"No start_order telemetry file found for machine_id={machine_id}, order_id={order_id}")
         return None
+    logger.info(f"Selected telemetry file for machine_id={machine_id}, order_id={order_id}: {telemetry_file}")
 
+    logger.info(f"Fetching telemetry data for machine_id={machine_id}, order_id={order_id}")
     order_telemetry = fetch_telemetry_data(order_id, telemetry_file)
     if not order_telemetry:
         logger.warning(f"No start_order data found for machine_id={machine_id}, order_id={order_id}")
         return None
     logger.info(f"Found start_order data for order_id={order_id}")
 
+    logger.info(f"Selecting orders file for machine_id={machine_id}, order_id={order_id}")
     orders_file = OrderFileSelector().select(files)
+    logger.info(f"Selected orders file for machine_id={machine_id}, order_id={order_id}: {orders_file}")
     order_info = None
     if orders_file:
         order_strategy = OrdersStrategy()
@@ -265,12 +293,15 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
         if order_info:
             order_telemetry["start_time"] = order_info.start_time.timestamp()
             order_telemetry["end_time"] = order_info.end_time.timestamp()
+            logger.info(f"Fetched order info from orders file for machine_id={machine_id}, order_id={order_id}")
         else:
             logger.warning(f"No order info found in orders file for machine_id={machine_id}, order_id={order_id}, orders_file={orders_file}")
     else:
         logger.warning(f"No orders file found for machine_id={machine_id}, order_id={order_id}")
 
+    logger.info(f"Selecting sauce weight file for machine_id={machine_id}, order_id={order_id}")
     sauce_weight_file = SauceWeightFileSelector().select(files)
+    logger.info(f"Selected sauce weight file for machine_id={machine_id}, order_id={order_id}: {sauce_weight_file}")
     sauce_points = list()
     if sauce_weight_file and order_info:
         sauce_strategy = SauceWeightStrategy()
@@ -281,14 +312,21 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
         )
         if len(sauce_points) == 0:
             logger.warning(f"No sauce weight points found in sauce weight file for machine_id={machine_id}, order_id={order_id}, sauce_weight_file={sauce_weight_file}")
+        else:
+            logger.info(f"Fetched {len(sauce_points)} sauce weight points for machine_id={machine_id}, order_id={order_id}")
 
+    logger.info(f"Searching for video file for machine_id={machine_id}, order_id={order_id}")
     video_url = find_video_file(machine_id, order_id)
+    logger.info(f"Video URL found: {video_url is not None} for machine_id={machine_id}, order_id={order_id}")
 
     end_order_ts = order_telemetry.get("end_time", 0.0)
 
+    logger.info(f"Fetching all order logs for machine_id={machine_id}, order_id={order_id}")
     all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=files)
     all_order_logs = dict(sorted(all_order_logs.items()))
+    logger.info(f"Fetched {len(all_order_logs)} log files for machine_id={machine_id}, order_id={order_id}")
 
+    logger.info(f"Composing motors data for machine_id={machine_id}, order_id={order_id}")
     motors = dict()
     motor_names = [
         "truck", "screen", "revolver", "screw", "pump", "lifter", "spade", "clearance", "mixer"
@@ -329,6 +367,7 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
                 "state": state
             }
         motors[motor] = motor_data
+    logger.info(f"Motors data composed for machine_id={machine_id}, order_id={order_id}")
 
     # Compose OrderTelemetry
     try:

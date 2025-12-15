@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from app.constants import DATA_DIR
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("robot_viewer")
 
 
 def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path]:

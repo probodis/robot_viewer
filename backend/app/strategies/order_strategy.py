@@ -6,7 +6,7 @@ from pathlib import Path
 from app.schemas.order import Order
 from app.utils import open_text
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("robot_viewer")
 
 
 class OrdersStrategy:
