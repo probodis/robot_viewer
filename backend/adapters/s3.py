@@ -87,27 +87,52 @@ class S3Client:
             )
             raise e from e
 
-    def list_files_in_folder(self, folder: Path) -> list[str]:
+    def list_files_in_folder(
+        self,
+        folder: Path,
+        limit: int | None = None,
+        reverse: bool = False,
+    ) -> list[str]:
         """
-        List all files in a specified S3 folder (prefix).
+        List files in an S3 folder (prefix), sorted by key name.
 
         Args:
             folder (Path): S3 folder (prefix).
+            limit (int | None): Return only N files.
+            reverse (bool): Sort descending (Z → A).
+
         Returns:
             list[str]: List of file keys.
         """
         prefix = self._normalize_key(folder)
+        if prefix and not prefix.endswith("/"):
+            prefix = f"{prefix}/"
+
         try:
             paginator = self.client.get_paginator("list_objects_v2")
-            page_iterator = paginator.paginate(Bucket=self.bucket_name, Prefix=prefix)
-            files = []
+            page_iterator = paginator.paginate(
+                Bucket=self.bucket_name,
+                Prefix=prefix,
+            )
+
+            files: list[str] = []
+
             for page in page_iterator:
                 for obj in page.get("Contents", []):
                     files.append(obj["Key"])
+
+            files.sort(reverse=reverse)
+
+            if limit is not None:
+                files = files[-limit:] if not reverse else files[:limit]
+
             return files
+
         except Exception as e:
-            self.logger.error(f"Failed to list files in folder: prefix='{prefix}' error='{repr(e)}'")
-            raise e from e
+            self.logger.error(
+                f"Failed to list files in folder: prefix='{prefix}' error='{repr(e)}'"
+            )
+            raise
         
 
 def get_s3_client(config: Config) -> S3Client:

@@ -7,6 +7,7 @@ This project provides a web-based interface to view robot telemetry data synchro
 * **Data Visualization**: View robot telemetry data through interactive charts.
 * **Video Playback**: Watch videos of robot operations alongside telemetry data.
 * **Easy Navigation**: Switch between different orders to view their corresponding data.
+* **Machine Videos List**: Browse the last 10 available videos for a machine.
  
 ## Project Structure
 
@@ -65,6 +66,21 @@ To get the application up and running, follow these steps:
 
     * The **frontend** will be available at [http://localhost:5173/robot_viewer/](http://localhost:5173/robot_viewer/).
     * The **backend** API will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+## Machine Videos List
+
+The UI includes a page to browse the last 10 available videos for a specific machine:
+
+* Frontend route: `http://localhost:5173/robot_viewer/machine/<machine_id>`
+* Backend endpoint: `GET /api/v1/machine/videos?machine_id=<machine_id>`
+
+The endpoint returns a list of objects:
+
+```json
+[
+    { "filename": "2025-09-04_12-30-01.mp4", "url": "https://..." }
+]
+```
 
 ## Development
 To run the application in development mode, follow these steps:

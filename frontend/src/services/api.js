@@ -18,6 +18,14 @@ export default {
 
   getLogFile: (machineId, logKey) =>
     apiClient.get(`/v1/log`, { params: { machine_id: machineId, log_key: logKey } }),
+
+  /**
+   * Fetch last available videos for a specific machine.
+   * @param {string} machineId - Machine identifier (e.g., "cb-3-0020")
+   * @returns {Promise} Axios response promise
+   */
+  getMachineVideos: (machineId) =>
+    apiClient.get(`/v1/machine/videos`, { params: { machine_id: machineId } }),
   /**
    * Fetch backend version info.
    * @returns {Promise} Axios response promise

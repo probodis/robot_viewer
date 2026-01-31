@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas.telemetry import OrderTelemetry
+from app.schemas.video import MachineVideo
 from app.utils import open_text
 from app.constants import DATA_DIR, LOGS_DIR
 from app.strategies.order_strategy import OrdersStrategy
@@ -293,6 +294,62 @@ def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
         return None
 
 
+def _get_latest_machine_videos(machine_id: str, limit: int = 10) -> list[MachineVideo]:
+    """Return latest available videos for a machine.
+
+    Args:
+        machine_id: Machine identifier.
+        limit: Maximum number of videos to return.
+
+    Returns:
+        List of MachineVideo with presigned URLs.
+    """
+    start_time = time.perf_counter()
+
+    config = get_config()
+    s3_client = get_s3_client(config)
+
+    folder = Path(f"xcubes/{machine_id}/logs/videos/")
+    logger.info(f"Listing machine videos: machine_id={machine_id} prefix='{folder}'")
+
+    try:
+        keys = s3_client.list_files_in_folder(folder=folder, limit=10, reverse=True)
+    except Exception as e:
+        logger.error(f"Failed to list machine videos: machine_id={machine_id} prefix='{folder}' error={repr(e)}")
+        raise
+
+    if not keys:
+        logger.info(
+            f"No machine videos found: machine_id={machine_id} prefix='{folder}' duration={time.perf_counter() - start_time:.3f}s"
+        )
+        return list()
+
+    items: list[tuple[str, str]] = []
+    for key in keys:
+        filename = key.split("/")[-1]
+        items.append((key, filename))
+
+    # Filenames include timestamp; lexicographic sort matches chronological order.
+    items.sort(key=lambda it: it[1])
+
+    latest = items[-limit:]
+    result: list[MachineVideo] = []
+    for key, filename in latest:
+        try:
+            url = s3_client.get_presigned_url(Path(key))
+        except Exception as e:
+            logger.error(
+                f"Failed to generate presigned URL for video: machine_id={machine_id} key='{key}' error={repr(e)}"
+            )
+            continue
+        result.append(MachineVideo(filename=filename, url=url))
+
+    logger.info(
+        f"Machine videos listed: machine_id={machine_id} found={len(keys)} returned={len(result)} duration={time.perf_counter() - start_time:.3f}s"
+    )
+    return result
+
+
 @app.get("/api/v1/orders/", response_model=OrderTelemetry)
 def get_order_telemetry(machine_id: str, order_id: float):
     """
@@ -374,3 +431,30 @@ def get_version():
     """
     logger.info("API request: /api/v1/version")
     return {"version": backend_version}
+
+
+@app.get("/api/v1/machine/videos", response_model=list[MachineVideo])
+def get_machine_videos(machine_id: str):
+    """Return last 10 available videos for a machine.
+
+    Args:
+        machine_id: Machine identifier.
+
+    Returns:
+        List of videos (filename + presigned URL). Returns an empty list if nothing found.
+    """
+    start_time = time.perf_counter()
+    logger.info(f"API request: /api/v1/machine/videos machine_id={machine_id}")
+
+    try:
+        videos = _get_latest_machine_videos(machine_id=machine_id, limit=10)
+    except Exception as e:
+        logger.error(
+            f"Machine videos endpoint failed: machine_id={machine_id} duration={time.perf_counter() - start_time:.3f}s error={repr(e)}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to list machine videos.")
+
+    logger.info(
+        f"Machine videos returned: machine_id={machine_id} count={len(videos)} duration={time.perf_counter() - start_time:.3f}s"
+    )
+    return videos
