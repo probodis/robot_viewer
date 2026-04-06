@@ -11,8 +11,11 @@ logger = logging.getLogger("robot_viewer")
 def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path]:
     """
     Search for all suitable log files for a machine up to a given timestamp.
-    Returns a dict with keys as relative paths from machine_id/logs and values as Path objects.
-    For each subdirectory and suffix, only the latest file <= target_date is returned.
+
+    Returns:
+        dict[str, Path]: Keys are relative paths from machine_id/logs, values are Path objects.
+        For each subdirectory and suffix, only the latest file <= target_date is returned.
+        If both .txt and .txt.gz exist for the same date+suffix, prefer .txt.gz because it may contain more complete data.
     """
     start_time = time.perf_counter()
     dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)

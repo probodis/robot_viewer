@@ -1,0 +1,47 @@
+---
+description: Описание проекта Robot Viewer — назначение, архитектура, стек
+alwaysApply: true
+---
+
+# Robot Viewer
+
+Внутренний сервис для команды инженеров, разрабатывающих флот роботов-пиццамейкеров.
+Позволяет просматривать телеметрию и диагностику по конкретному заказу: графики моторов/датчиков, видеозапись приготовления, текстовые логи.
+
+## Назначение
+
+- Быстрый разбор инцидентов: инженер вводит `machine_id` + `order_id` и видит полную картину заказа.
+- Визуализация телеметрии (ECharts): графики моторов, веса соуса и т.д.
+- Просмотр видео заказа (S3 presigned URLs).
+- Просмотр текстовых логов робота.
+- Список последних видео по конкретной машине.
+
+## Стек
+
+| Слой | Технологии |
+|------|-----------|
+| Backend | Python 3.11, FastAPI, Uvicorn, Pydantic, boto3 (S3) |
+| Frontend | Vue 3, Vue Router 4, Vite, axios, ECharts + vue-echarts |
+| Деплой | Docker Compose, Makefile, nginx (SPA под `/robot_viewer/`) |
+
+## Структура
+
+```
+backend/
+  app/           # FastAPI-приложение, роуты, схемы, стратегии
+  adapters/      # Внешние интеграции (S3)
+  configs/       # Pydantic Settings (env)
+frontend/
+  src/
+    views/       # Страницы (RobotViewer, LogFileView, MachineInfo, DebugWeightChart)
+    components/  # UI-компоненты (TelemetryChart, WeightChart, LogTabs, VideoPlayer)
+    services/    # axios API-клиент
+    router/      # Vue Router
+```
+
+## Ключевые API-эндпоинты
+
+- `GET /api/v1/orders/` — телеметрия заказа (моторы, логи, вес соуса, видео)
+- `GET /api/v1/log` — содержимое лог-файла
+- `GET /api/v1/machine/videos` — последние видео машины
+- `GET /api/v1/version` — версия бэкенда
