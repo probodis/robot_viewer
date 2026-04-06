@@ -41,6 +41,9 @@ def find_suitable_files(machine_id: str, timestamp: float) -> dict[str, Path]:
             file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
             suffix = match.group(2)
 
+            if re.search(r"_\d{12}$", suffix):
+                continue
+
             if file_date <= target_date and suffix not in latest_files:
                 latest_files[suffix] = file_path
                 logger.debug(f"Adding file {file_path} for suffix {suffix}")
