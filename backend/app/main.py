@@ -16,11 +16,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas.telemetry import OrderTelemetry
+from app.schemas.scanner import ScannerArchive
 from app.schemas.video import MachineVideo
 from app.utils import open_text
 from app.constants import DATA_DIR, LOGS_DIR
 from app.strategies.order_strategy import OrdersStrategy
 from app.strategies.sauce_weight_strategy import SauceWeightStrategy
+from app.strategies.scanner_strategy import ScannerArchiveStrategy
 from app.infrastructure.filesystem.file_finder import find_suitable_files
 from app.infrastructure.filesystem.file_selectors import TelemetryFileSelector, OrderFileSelector, SauceWeightFileSelector
 from app.infrastructure.filesystem.log_window_extractor import fetch_all_order_logs
@@ -375,6 +377,57 @@ def get_order_telemetry(machine_id: str, order_id: float):
     total_time = time.perf_counter() - start_time
     logger.info(f"Order telemetry returned for machine_id={machine_id}, order_id={order_id}, duration={total_time:.3f}s")
     return order_data
+
+
+@app.get("/api/v1/orders/scanner", response_model=ScannerArchive)
+def get_scanner_archive(machine_id: str, order_id: float):
+    """Return a presigned URL for the pizza-scanner archive of a given order.
+
+    Searches ``xcubes/{machine_id}/logs/scanner/`` on S3 for the ``.zip``
+    file whose timestamp is closest to *order_id* (within 60 s tolerance).
+    """
+    start_time = time.perf_counter()
+    logger.info(f"API request: /api/v1/orders/scanner machine_id={machine_id}, order_id={order_id}")
+
+    config = get_config()
+    s3_client = get_s3_client(config)
+
+    strategy = ScannerArchiveStrategy(s3_client)
+    try:
+        result = strategy.find_archive_key(machine_id=machine_id, order_id=order_id)
+    except Exception as e:
+        logger.error(
+            f"Scanner archive lookup failed: machine_id={machine_id} order_id={order_id} "
+            f"duration={time.perf_counter() - start_time:.3f}s error={repr(e)}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to search for scanner archive.")
+
+    if result is None:
+        logger.warning(
+            f"Scanner archive not found: machine_id={machine_id} order_id={order_id} "
+            f"duration={time.perf_counter() - start_time:.3f}s"
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Scanner archive not found for machine '{machine_id}', order '{order_id}'.",
+        )
+
+    s3_key, filename = result
+
+    try:
+        url = s3_client.get_presigned_url(Path(s3_key), expires_in=60*60*24)
+    except Exception as e:
+        logger.error(
+            f"Presigned URL generation failed: key='{s3_key}' "
+            f"duration={time.perf_counter() - start_time:.3f}s error={repr(e)}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to generate download URL.")
+
+    logger.info(
+        f"Scanner archive returned: machine_id={machine_id} order_id={order_id} "
+        f"file='{filename}' duration={time.perf_counter() - start_time:.3f}s"
+    )
+    return ScannerArchive(filename=filename, url=url)
 
 
 @app.get("/api/v1/log")

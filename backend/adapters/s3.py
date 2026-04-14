@@ -135,6 +135,47 @@ class S3Client:
             raise
         
 
+    def list_files_by_prefix(
+        self,
+        prefix: str | Path,
+        limit: int | None = None,
+    ) -> list[str]:
+        """List S3 keys matching an arbitrary prefix (no trailing ``/`` added).
+
+        Args:
+            prefix: Raw S3 prefix to search.
+            limit: Return at most *limit* keys (smallest keys first).
+
+        Returns:
+            Sorted list of matching S3 keys.
+        """
+        normalized = self._normalize_key(prefix)
+        try:
+            paginator = self.client.get_paginator("list_objects_v2")
+            page_iterator = paginator.paginate(
+                Bucket=self.bucket_name,
+                Prefix=normalized,
+            )
+
+            files: list[str] = list()
+            for page in page_iterator:
+                for obj in page.get("Contents", list()):
+                    files.append(obj["Key"])
+
+            files.sort()
+
+            if limit is not None:
+                files = files[:limit]
+
+            return files
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to list files by prefix: prefix='{normalized}' error='{repr(e)}'"
+            )
+            raise
+
+
 def get_s3_client(config: Config) -> S3Client:
     return S3Client(
         bucket_name=config.DATA_BUCKET_NAME,
