@@ -27,6 +27,15 @@ export default {
   getMachineVideos: (machineId) =>
     apiClient.get(`/v1/machine/videos`, { params: { machine_id: machineId } }),
   /**
+   * Fetch presigned URL for the scanner archive of an order.
+   * @param {string} machineId - Machine identifier
+   * @param {number} orderId - Order timestamp
+   * @returns {Promise} Axios response promise (404 when archive not found)
+   */
+  getScannerArchive: (machineId, orderId) =>
+    apiClient.get('/v1/orders/scanner', { params: { machine_id: machineId, order_id: orderId } }),
+
+  /**
    * Fetch backend version info.
    * @returns {Promise} Axios response promise
    */

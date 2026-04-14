@@ -46,6 +46,20 @@
               muted
             ></video>
           </div>
+          <div class="scanner-section">
+            <a
+              v-if="scannerArchive"
+              :href="scannerArchive.url"
+              class="scanner-btn scanner-btn--ready"
+              target="_blank"
+              rel="noopener"
+            >Download Scanner Archive</a>
+            <button
+              v-else
+              class="scanner-btn scanner-btn--disabled"
+              disabled
+            >{{ isScannerLoading ? 'Searching scanner archive...' : 'Scanner archive not found' }}</button>
+          </div>
         </div>
 
         <!-- Right column: charts -->
@@ -128,6 +142,9 @@ const videoPlayer = ref(null)
 const syncedTime = ref(0)
 const backendVersion = ref('N/A')
 
+const scannerArchive = ref(null)
+const isScannerLoading = ref(false)
+
 onMounted(async () => {
   try {
     if (route.query.order_id) selectedOrderId.value = route.query.order_id
@@ -157,12 +174,28 @@ async function fetchOrderData(machineId, orderId) {
   }
 }
 
+async function fetchScannerArchive(machineId, orderId) {
+  scannerArchive.value = null
+  isScannerLoading.value = true
+  try {
+    const response = await api.getScannerArchive(machineId, orderId)
+    scannerArchive.value = response.data
+  } catch (error) {
+    console.error('Failed to fetch scanner archive:', error)
+  } finally {
+    isScannerLoading.value = false
+  }
+}
+
 watch(
   () => [route.query.order_id, route.query.machine_id],
   ([newOrderId, newMachineId]) => {
     if (newOrderId) selectedOrderId.value = newOrderId
     if (newMachineId) selectedMachineId.value = newMachineId
-    if (newOrderId && newMachineId) fetchOrderData(newMachineId, newOrderId)
+    if (newOrderId && newMachineId) {
+      fetchOrderData(newMachineId, newOrderId)
+      fetchScannerArchive(newMachineId, newOrderId)
+    }
   },
   { immediate: true }
 )
@@ -271,6 +304,40 @@ function handleChartTimeUpdate(newTime) {
 video {
   width: 100%;
   border: 1px solid #ccc;
+}
+
+.scanner-section {
+  margin-top: 12px;
+}
+
+.scanner-btn {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+  text-decoration: none;
+  box-sizing: border-box;
+  border: none;
+  transition: background-color 0.15s;
+}
+
+.scanner-btn--ready {
+  background-color: #1976d2;
+  color: #fff;
+  cursor: pointer;
+}
+
+.scanner-btn--ready:hover {
+  background-color: #1565c0;
+}
+
+.scanner-btn--disabled {
+  background-color: #e5e7eb;
+  color: #9ca3af;
+  cursor: default;
 }
 
 .charts-section {
