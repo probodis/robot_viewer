@@ -14,15 +14,18 @@ import base64
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from app.schemas.telemetry import OrderTelemetry
 from app.schemas.scanner import ScannerArchive
 from app.schemas.video import MachineVideo
+from app.schemas.log_file import LogFileInfo
 from app.utils import open_text
 from app.constants import DATA_DIR, LOGS_DIR
 from app.strategies.order_strategy import OrdersStrategy
 from app.strategies.sauce_weight_strategy import SauceWeightStrategy
 from app.strategies.scanner_strategy import ScannerArchiveStrategy
+from app.strategies.machine_logs_strategy import MachineLogsStrategy
 from app.infrastructure.filesystem.file_finder import find_suitable_files
 from app.infrastructure.filesystem.file_selectors import TelemetryFileSelector, OrderFileSelector, SauceWeightFileSelector
 from app.infrastructure.filesystem.log_window_extractor import fetch_all_order_logs
@@ -473,6 +476,111 @@ def get_log_file(machine_id: str, log_key: str):
             status_code=500,
             detail=f"Error reading log file '{log_key}' for machine '{machine_id}'."
         )
+
+
+@app.get("/api/v1/machine/logs", response_model=list[LogFileInfo])
+def list_machine_logs(machine_id: str):
+    """Return a list of available text log files for a machine.
+
+    Excludes backup copies whose stem ends with 12 digits (``_NNNNNNNNNNNN``).
+
+    Args:
+        machine_id: Machine identifier.
+
+    Returns:
+        Sorted list of log file metadata.
+    """
+    start_time = time.perf_counter()
+    logger.info(f"API request: /api/v1/machine/logs machine_id={machine_id}")
+
+    strategy = MachineLogsStrategy(DATA_DIR)
+    try:
+        files = strategy.list_log_files(machine_id)
+    except ValueError:
+        logger.warning(
+            f"Invalid machine_id rejected: machine_id={machine_id} "
+            f"duration={time.perf_counter() - start_time:.3f}s"
+        )
+        raise HTTPException(status_code=400, detail="Invalid machine identifier.")
+    except FileNotFoundError:
+        logger.warning(
+            f"Logs directory not found: machine_id={machine_id} "
+            f"duration={time.perf_counter() - start_time:.3f}s"
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Logs directory not found for machine '{machine_id}'.",
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to list log files: machine_id={machine_id} "
+            f"duration={time.perf_counter() - start_time:.3f}s error={repr(e)}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to list log files.")
+
+    logger.info(
+        f"Machine logs listed: machine_id={machine_id} count={len(files)} "
+        f"duration={time.perf_counter() - start_time:.3f}s"
+    )
+    return files
+
+
+@app.get("/api/v1/machine/logs/download")
+def download_machine_log(machine_id: str, log_key: str):
+    """Download a specific log file for a machine as-is.
+
+    The ``log_key`` parameter should be a ``relative_path`` value obtained
+    from the ``GET /api/v1/machine/logs`` listing endpoint.
+
+    Args:
+        machine_id: Machine identifier.
+        log_key: Relative path to the log file inside the machine's logs directory.
+
+    Returns:
+        Streaming file response with ``Content-Disposition: attachment``.
+    """
+    start_time = time.perf_counter()
+    logger.info(f"API request: /api/v1/machine/logs/download machine_id={machine_id} log_key={log_key}")
+
+    strategy = MachineLogsStrategy(DATA_DIR)
+    try:
+        file_path = strategy.resolve_log_file(machine_id, log_key)
+    except ValueError:
+        logger.warning(
+            f"Invalid log key rejected: machine_id={machine_id} log_key={log_key} "
+            f"duration={time.perf_counter() - start_time:.3f}s"
+        )
+        raise HTTPException(status_code=400, detail="Invalid log key.")
+    except FileNotFoundError:
+        logger.warning(
+            f"Log file not found: machine_id={machine_id} log_key={log_key} "
+            f"duration={time.perf_counter() - start_time:.3f}s"
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Log file '{log_key}' not found for machine '{machine_id}'.",
+        )
+
+    media_type = "application/gzip" if file_path.name.endswith(".gz") else "text/plain; charset=utf-8"
+
+    def _iter_file():
+        chunk_size = 64 * 1024
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+    logger.info(
+        f"Streaming log file: machine_id={machine_id} log_key={log_key} "
+        f"file={file_path} duration={time.perf_counter() - start_time:.3f}s"
+    )
+    return StreamingResponse(
+        _iter_file(),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file_path.name}"'},
+    )
 
 
 @app.get("/api/v1/version")
