@@ -1,18 +1,19 @@
-import json
 import gzip
+import zlib
 import logging
 import time
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from adapters.s3 import get_s3_client
 from configs.config import get_config
-from datetime import datetime, timezone
+from datetime import datetime
+from contextlib import asynccontextmanager
+from pydantic import ValidationError
+import httpx
 
-import re
-from typing import Any
 import base64
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -20,15 +21,23 @@ from app.schemas.telemetry import OrderTelemetry
 from app.schemas.scanner import ScannerArchive
 from app.schemas.video import MachineVideo
 from app.schemas.log_file import LogFileInfo
-from app.utils import open_text
 from app.constants import DATA_DIR, LOGS_DIR
-from app.strategies.order_strategy import OrdersStrategy
-from app.strategies.sauce_weight_strategy import SauceWeightStrategy
+from adapters.postgrest import PostgrestOrdersRepository
+from adapters.order_assets import S3OrderAssets
+from app.services.order_viewer import OrderViewerService
+from app.services.order_logs import (
+    OrderLogWindowService,
+    DiagnosticWindowUnavailable,
+    resolve_text_log,
+    MAX_INPUT_BYTES,
+)
+from app.services.errors import (
+    InvalidUpstreamResponse,
+    UpstreamUnavailable,
+    DiagnosticLogUnavailable,
+)
 from app.strategies.scanner_strategy import ScannerArchiveStrategy
 from app.strategies.machine_logs_strategy import MachineLogsStrategy
-from app.infrastructure.filesystem.file_finder import find_suitable_files
-from app.infrastructure.filesystem.file_selectors import TelemetryFileSelector, OrderFileSelector, SauceWeightFileSelector
-from app.infrastructure.filesystem.log_window_extractor import fetch_all_order_logs
 from ._version import __version__ as backend_version
 
 
@@ -36,15 +45,24 @@ from ._version import __version__ as backend_version
 
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+
 class CustomDailyFileHandler(TimedRotatingFileHandler):
     """
     Custom handler to format log filename as YYYY-MM-DD_robot_viewer.log
     """
+
     def __init__(self, logs_dir: Path, **kwargs):
         self.logs_dir = logs_dir
         # Set initial filename
         filename = self._get_filename()
-        super().__init__(filename=filename, when="midnight", interval=1, backupCount=30, encoding="utf-8", **kwargs)
+        super().__init__(
+            filename=filename,
+            when="midnight",
+            interval=1,
+            backupCount=30,
+            encoding="utf-8",
+            **kwargs,
+        )
 
     def _get_filename(self):
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -54,23 +72,71 @@ class CustomDailyFileHandler(TimedRotatingFileHandler):
         self.baseFilename = self._get_filename()
         super().doRollover()
 
+
 logger = logging.getLogger("robot_viewer")
 logger.setLevel(logging.DEBUG)
 
 handler = CustomDailyFileHandler(logs_dir=LOGS_DIR)
 formatter = logging.Formatter(
     fmt="level=%(levelname)s time=%(asctime)s module=%(module)s func=%(funcName)s msg=%(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S%z"
+    datefmt="%Y-%m-%dT%H:%M:%S%z",
 )
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own one connection pool per worker and close it on worker shutdown."""
+    try:
+        config = get_config()
+    except ValidationError as error:
+        fields = ",".join(
+            ".".join(str(part) for part in item["loc"])
+            for item in error.errors(include_input=False)
+        )
+        logger.error("event=backend_configuration_invalid fields=%s", fields)
+        raise RuntimeError(
+            "Robot Viewer backend configuration is invalid; check configured field names in logs."
+        ) from None
+    with httpx.Client(
+        base_url=str(config.POSTGREST_BASE_URL).rstrip("/") + "/",
+        headers={"X-API-Key": config.POSTGREST_API_KEY.get_secret_value()},
+        timeout=httpx.Timeout(
+            config.POSTGREST_TIMEOUT_SECONDS,
+            connect=config.POSTGREST_CONNECT_TIMEOUT_SECONDS,
+        ),
+        limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+        follow_redirects=False,
+    ) as client:
+        storage = get_s3_client(config)
+        try:
+            repository = PostgrestOrdersRepository(client)
+            app.state.order_service = OrderViewerService(
+                repository, S3OrderAssets(storage, config.TELEMETRY_MAX_BYTES)
+            )
+            app.state.order_log_service = OrderLogWindowService(repository, DATA_DIR)
+            logger.info("event=order_dependencies_ready version=%s", backend_version)
+            yield
+        finally:
+            storage.client.close()
+
+
+def get_order_service(request: Request) -> OrderViewerService:
+    return request.app.state.order_service
+
+
+def get_order_log_service(request: Request) -> OrderLogWindowService:
+    return request.app.state.order_log_service
+
+
 app = FastAPI(
     title="Robot Telemetry API",
     description="API for serving pre-processed robot telemetry data and videos.",
-    version="1.0.0"
+    version=backend_version,
+    lifespan=lifespan,
 )
+
 
 # Middleware to log request start/end and duration for all API calls
 @app.middleware("http")
@@ -91,8 +157,13 @@ async def log_request_time(request, call_next):
         return response
     finally:
         duration = time.perf_counter() - start_time
-        status_code = getattr(response, 'status_code', 'N/A') if response is not None else 'N/A'
-        logger.info(f"Request finished: method={request.method} url={request.url} duration={duration:.3f}s status_code={status_code}")
+        status_code = (
+            getattr(response, "status_code", "N/A") if response is not None else "N/A"
+        )
+        logger.info(
+            f"Request finished: method={request.method} url={request.url} duration={duration:.3f}s status_code={status_code}"
+        )
+
 
 # Allow Cross-Origin Resource Sharing (CORS) for the frontend.
 app.add_middleware(
@@ -102,201 +173,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
-
-
-def fetch_telemetry_data(order_id: float, file: Path) -> dict[str, Any] | None:
-    """
-    Fetch telemetry data for a given order_id from a file.
-    Args:
-        order_id (float): Order identifier.
-        file (Path): Path to telemetry file.
-    Returns:
-        dict[str, Any] | None: Telemetry data or None if not found.
-    """
-    start_time = time.perf_counter()
-
-    tolerance = 3.0
-    pattern = re.compile(r"'start_time':\s*([\d]+\.[\d]+|[\d]+)")
-
-    try:
-        with open_text(file) as f:
-            for line in f:
-                match = pattern.search(line)
-                if match:
-                    start_time = float(match.group(1))
-                    if abs(start_time - order_id) <= tolerance:
-                        json_str = line.replace("'", '"')
-                        json_str = json_str.replace('None', 'null').replace('True', 'true').replace('False', 'false')
-                        try:
-                            data = json.loads(json_str)
-                            logger.info(f"Telemetry data found for order_id={order_id} in file={file}, duration={time.perf_counter() - start_time:.3f}s")
-                            return data
-                        except Exception as e:
-                            logger.error(f"Failed to parse telemetry data for order_id={order_id} in file={file}, duration={time.perf_counter() - start_time:.3f}s: {e}")
-                            return None
-    except Exception as e:
-        logger.error(f"Error reading telemetry file {file}: {e}")
-    logger.warning(f"No telemetry data found for order_id={order_id} in file={file}, duration={time.perf_counter() - start_time:.3f}s")
-    return None
-
-def find_video_file(machine_id: str, order_id: float) -> str | None:
-    """
-    Search for a matching video file in S3 within ±3 seconds of order_id and return its presigned URL if found.
-    """
-    start_time = time.perf_counter()
-
-    config = get_config()
-    s3_client = get_s3_client(config)
-
-    tolerance = 3.0
-
-    # Generate possible timestamps within tolerance window
-    possible_timestamps = [order_id + offset for offset in range(-int(tolerance), int(tolerance) + 1)]
-    checked_files = list()
-    for ts in possible_timestamps:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        filename = dt.strftime("%Y-%m-%d_%H-%M-%S.mp4")
-        s3_key = Path(f"xcubes/{machine_id}/logs/videos/{filename}")
-        checked_files.append(str(s3_key))
-        try:
-            if s3_client.is_file_exist(s3_key=s3_key):
-                logger.info(f"Found video file for machine_id={machine_id}, order_id={order_id}: {s3_key}, duration={time.perf_counter() - start_time:.3f}s")
-                return s3_client.get_presigned_url(s3_key)
-        except Exception as e:
-            logger.error(f"Error checking video file existence for {s3_key}, duration={time.perf_counter() - start_time:.3f}s: {e}")
-            continue
-
-    logger.warning(f"No video file found for machine_id={machine_id}, order_id={order_id}, checked_files={checked_files}, duration={time.perf_counter() - start_time:.3f}s")
-    return None
-
-
-def fetch_order_data(machine_id: str, order_id: float) -> OrderTelemetry | None:
-    start_time = time.perf_counter()
-
-    logger.info(f"Find suitable files for machine_id={machine_id}, order_id={order_id}")
-    files = find_suitable_files(machine_id, order_id)
-    if not files:
-        logger.warning(f"No files found for machine_id={machine_id}, order_id={order_id}")
-        return None
-    logger.info(f"Suitable files found for machine_id={machine_id}, order_id={order_id}: {list(files.keys())}")
-    
-    logger.info(f"Selecting telemetry file for machine_id={machine_id}, order_id={order_id}")
-    telemetry_file = TelemetryFileSelector().select(files)
-    if telemetry_file is None:
-        logger.warning(f"No start_order telemetry file found for machine_id={machine_id}, order_id={order_id}")
-        return None
-    logger.info(f"Selected telemetry file for machine_id={machine_id}, order_id={order_id}: {telemetry_file}")
-
-    logger.info(f"Fetching telemetry data for machine_id={machine_id}, order_id={order_id}")
-    order_telemetry = fetch_telemetry_data(order_id, telemetry_file)
-    if not order_telemetry:
-        logger.warning(f"No start_order data found for machine_id={machine_id}, order_id={order_id}")
-        return None
-    logger.info(f"Found start_order data for order_id={order_id}")
-
-    logger.info(f"Selecting orders file for machine_id={machine_id}, order_id={order_id}")
-    orders_file = OrderFileSelector().select(files)
-    logger.info(f"Selected orders file for machine_id={machine_id}, order_id={order_id}: {orders_file}")
-    order_info = None
-    if orders_file:
-        order_strategy = OrdersStrategy()
-        order_info = order_strategy.fetch_order(order_id=order_id, path=orders_file)
-        if order_info:
-            order_telemetry["start_time"] = order_info.start_time.timestamp()
-            order_telemetry["end_time"] = order_info.end_time.timestamp()
-            logger.info(f"Fetched order info from orders file for machine_id={machine_id}, order_id={order_id}")
-        else:
-            logger.warning(f"No order info found in orders file for machine_id={machine_id}, order_id={order_id}, orders_file={orders_file}")
-    else:
-        logger.warning(f"No orders file found for machine_id={machine_id}, order_id={order_id}")
-
-    logger.info(f"Selecting sauce weight file for machine_id={machine_id}, order_id={order_id}")
-    sauce_weight_file = SauceWeightFileSelector().select(files)
-    logger.info(f"Selected sauce weight file for machine_id={machine_id}, order_id={order_id}: {sauce_weight_file}")
-    sauce_points = list()
-    if sauce_weight_file and order_info:
-        sauce_strategy = SauceWeightStrategy()
-        sauce_points = sauce_strategy.fetch_points(
-            order=order_info,
-            path=sauce_weight_file,
-            name_prefix="Sauce"
-        )
-        if len(sauce_points) == 0:
-            logger.warning(f"No sauce weight points found in sauce weight file for machine_id={machine_id}, order_id={order_id}, sauce_weight_file={sauce_weight_file}")
-        else:
-            logger.info(f"Fetched {len(sauce_points)} sauce weight points for machine_id={machine_id}, order_id={order_id}")
-
-    logger.info(f"Searching for video file for machine_id={machine_id}, order_id={order_id}")
-    video_url = find_video_file(machine_id, order_id)
-    logger.info(f"Video URL found: {video_url is not None} for machine_id={machine_id}, order_id={order_id}")
-
-    end_order_ts = order_telemetry.get("end_time", 0.0)
-
-    logger.info(f"Fetching all order logs for machine_id={machine_id}, order_id={order_id}")
-    all_order_logs = fetch_all_order_logs(order_id=order_id, end_order_ts=end_order_ts, log_files=files)
-    all_order_logs = dict(sorted(all_order_logs.items()))
-    # all_order_logs = dict()
-    logger.info(f"Fetched {len(all_order_logs)} log files for machine_id={machine_id}, order_id={order_id}")
-
-    logger.info(f"Composing motors data for machine_id={machine_id}, order_id={order_id}")
-    motors = dict()
-    motor_names = [
-        "truck", "screen", "revolver", "screw", "pump", "lifter", "spade", "clearance", "mixer"
-    ]
-    for motor in motor_names:
-        # Compose keys for each metric
-        velocity = {
-            "time": order_telemetry.get(f"{motor}_velocity_time", list()),
-            "value": order_telemetry.get(f"{motor}_velocity_value", list())
-        }
-        position = {
-            "time": order_telemetry.get(f"{motor}_position_time", list()),
-            "value": order_telemetry.get(f"{motor}_position_value", list())
-        }
-        state = {
-            "time": order_telemetry.get(f"{motor}_state_time", list()),
-            "value": order_telemetry.get(f"{motor}_state_value", list())
-        }
-        # Optional weight sensor (e.g., for screen)
-        weight = None
-        if f"{motor}_weight_time" in order_telemetry and f"{motor}_weight_value" in order_telemetry:
-            weight = {
-                "time": order_telemetry.get(f"{motor}_weight_time", list()),
-                "value": order_telemetry.get(f"{motor}_weight_value", list())
-            }
-        # Only add weight if present and non-empty
-        if weight and (weight["time"] or weight["value"]):
-            motor_data = {
-                "velocity": velocity,
-                "position": position,
-                "state": state,
-                "weight": weight
-            }
-        else:
-            motor_data = {
-                "velocity": velocity,
-                "position": position,
-                "state": state
-            }
-        motors[motor] = motor_data
-    logger.info(f"Motors data composed for machine_id={machine_id}, order_id={order_id}")
-
-    # Compose OrderTelemetry
-    try:
-        order_telemetry = OrderTelemetry(
-            order_id=str(order_id),
-            start_time=order_telemetry.get("start_time", 0.0),
-            end_time=end_order_ts,
-            logs=all_order_logs or dict(),
-            video_path=video_url if video_url else "",
-            motors=motors,
-            extra_weight_points=sauce_points
-        )
-        logger.info(f"OrderTelemetry composed for machine_id={machine_id}, order_id={order_id}, duration={time.perf_counter() - start_time:.3f}s")
-        return order_telemetry
-    except Exception as e:
-        logger.error(f"OrderTelemetry validation failed for machine_id={machine_id}, order_id={order_id}, duration={time.perf_counter() - start_time:.3f}s: {e}")
-        return None
 
 
 def _get_latest_machine_videos(machine_id: str, limit: int = 10) -> list[MachineVideo]:
@@ -320,7 +196,9 @@ def _get_latest_machine_videos(machine_id: str, limit: int = 10) -> list[Machine
     try:
         keys = s3_client.list_files_in_folder(folder=folder, limit=10, reverse=True)
     except Exception as e:
-        logger.error(f"Failed to list machine videos: machine_id={machine_id} prefix='{folder}' error={repr(e)}")
+        logger.error(
+            f"Failed to list machine videos: machine_id={machine_id} prefix='{folder}' error={repr(e)}"
+        )
         raise
 
     if not keys:
@@ -356,30 +234,75 @@ def _get_latest_machine_videos(machine_id: str, limit: int = 10) -> list[Machine
 
 
 @app.get("/api/v1/orders/", response_model=OrderTelemetry)
-def get_order_telemetry(machine_id: str, order_id: float):
-    """
-    Returns the complete telemetry data for a specific order.
-    Args:
-        machine_id (str): Machine identifier.
-        order_id (float): Order identifier.
-    Returns:
-        OrderTelemetry: Telemetry data for the order.
-    """
-    start_time = time.perf_counter()
-    logger.info(f"API request: /api/v1/orders/ machine_id={machine_id}, order_id={order_id}")
-
-    order_data = fetch_order_data(machine_id=machine_id, order_id=order_id)
-
-    if not order_data:
-        logger.warning(f"Order with ID '{order_id}' not found for machine_id={machine_id}, duration={time.perf_counter() - start_time:.3f}s")
+def get_order_telemetry(
+    machine_id: str,
+    order_id: float,
+    service: OrderViewerService = Depends(get_order_service),
+):
+    """Read one indexed order and its referenced JSON; no filesystem discovery."""
+    try:
+        result = service.get_order(machine_id, order_id)
+    except ValueError:
         raise HTTPException(
-            status_code=404,
-            detail=f"Order with ID '{order_id}' not found."
-        )
+            status_code=422, detail="Invalid machine identifier or order timestamp."
+        ) from None
+    except UpstreamUnavailable:
+        raise HTTPException(
+            status_code=503, detail="Order metadata service is temporarily unavailable."
+        ) from None
+    except InvalidUpstreamResponse:
+        raise HTTPException(
+            status_code=502,
+            detail="Order metadata service returned an invalid response.",
+        ) from None
+    if result is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+    return result
 
-    total_time = time.perf_counter() - start_time
-    logger.info(f"Order telemetry returned for machine_id={machine_id}, order_id={order_id}, duration={total_time:.3f}s")
-    return order_data
+
+@app.get("/api/v1/orders/log-window")
+def get_order_log_window(
+    machine_id: str,
+    order_id: float,
+    log_key: str,
+    service: OrderLogWindowService = Depends(get_order_log_service),
+):
+    """Read a bounded UTC window from one explicitly selected text log."""
+    try:
+        result = service.get_window(machine_id, order_id, log_key)
+    except DiagnosticWindowUnavailable:
+        raise HTTPException(
+            status_code=409, detail="Order has no bounded diagnostic time window."
+        ) from None
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid machine identifier, order timestamp or text log key.",
+        ) from None
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404, detail="Requested text log is unavailable."
+        ) from None
+    except DiagnosticLogUnavailable:
+        raise HTTPException(
+            status_code=503, detail="Requested text log could not be read."
+        ) from None
+    except UpstreamUnavailable:
+        raise HTTPException(
+            status_code=503, detail="Order metadata service is temporarily unavailable."
+        ) from None
+    except InvalidUpstreamResponse:
+        raise HTTPException(
+            status_code=502,
+            detail="Order metadata service returned an invalid response.",
+        ) from None
+    except OSError:
+        raise HTTPException(
+            status_code=503, detail="Requested text log could not be read."
+        ) from None
+    if result is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+    return result
 
 
 @app.get("/api/v1/orders/scanner", response_model=ScannerArchive)
@@ -390,7 +313,9 @@ def get_scanner_archive(machine_id: str, order_id: float):
     file whose timestamp is closest to *order_id* (within 60 s tolerance).
     """
     start_time = time.perf_counter()
-    logger.info(f"API request: /api/v1/orders/scanner machine_id={machine_id}, order_id={order_id}")
+    logger.info(
+        f"API request: /api/v1/orders/scanner machine_id={machine_id}, order_id={order_id}"
+    )
 
     config = get_config()
     s3_client = get_s3_client(config)
@@ -403,7 +328,9 @@ def get_scanner_archive(machine_id: str, order_id: float):
             f"Scanner archive lookup failed: machine_id={machine_id} order_id={order_id} "
             f"duration={time.perf_counter() - start_time:.3f}s error={repr(e)}"
         )
-        raise HTTPException(status_code=500, detail="Failed to search for scanner archive.")
+        raise HTTPException(
+            status_code=500, detail="Failed to search for scanner archive."
+        )
 
     if result is None:
         logger.warning(
@@ -418,7 +345,7 @@ def get_scanner_archive(machine_id: str, order_id: float):
     s3_key, filename = result
 
     try:
-        url = s3_client.get_presigned_url(Path(s3_key), expires_in=60*60*24)
+        url = s3_client.get_presigned_url(Path(s3_key), expires_in=60 * 60 * 24)
     except Exception as e:
         logger.error(
             f"Presigned URL generation failed: key='{s3_key}' "
@@ -435,47 +362,42 @@ def get_scanner_archive(machine_id: str, order_id: float):
 
 @app.get("/api/v1/log")
 def get_log_file(machine_id: str, log_key: str):
-    """
-    Returns the content of a specific log file for a machine.
-    Args:
-        machine_id (str): Machine identifier.
-        log_key (str): Relative path to the log file.
-    Returns:
-        dict: Log file content encoded in base64.
-    """
-    start_time = time.perf_counter()
-    logger.info(f"API request: /api/v1/logs/ machine_id={machine_id}, log_key={log_key}")
-
-    log_file_path = DATA_DIR / machine_id / "logs" / log_key
-    if not log_file_path.exists() or not log_file_path.is_file():
-        logger.error(f"Log file '{log_key}' not found for machine_id={machine_id}, duration={time.perf_counter() - start_time:.3f}s")
-        raise HTTPException(
-            status_code=404,
-            detail=f"Log file '{log_key}' not found for machine '{machine_id}'."
-        )
-
+    """Read one explicit text log with the same path and size limits as diagnostics."""
     try:
-        if str(log_file_path).endswith('.gz'):
-            with gzip.open(log_file_path, "rt", encoding="utf-8") as f:
-                content = f.read()
-        else:
-            with log_file_path.open("r", encoding="utf-8") as f:
-                content = f.read()
-        
-        encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
-
-        total_time = time.perf_counter() - start_time
-        logger.info(f"Log file '{log_key}' returned for machine_id={machine_id}, duration={total_time:.3f}s")
-        return {
-            "path": str(log_file_path),
-            "text": encoded_content
-        }
-    except Exception as e:
-        logger.error(f"Error reading log file '{log_key}' for machine_id={machine_id}, duration={time.perf_counter() - start_time:.3f}s: {e}")
+        path = resolve_text_log(DATA_DIR, machine_id, log_key)
+        if not path.is_file():
+            raise FileNotFoundError
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rb") as stream:
+            content = stream.read(MAX_INPUT_BYTES + 1)
+        if len(content) > MAX_INPUT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Text log exceeds the 10 MiB limit; download the file instead.",
+            )
+        text = content.decode("utf-8", errors="replace")
+    except ValueError:
         raise HTTPException(
-            status_code=500,
-            detail=f"Error reading log file '{log_key}' for machine '{machine_id}'."
-        )
+            status_code=422, detail="Invalid machine identifier or text log key."
+        ) from None
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404, detail="Requested text log is unavailable."
+        ) from None
+    except (OSError, EOFError, zlib.error):
+        raise HTTPException(
+            status_code=503, detail="Requested text log could not be read."
+        ) from None
+    logger.info(
+        "event=full_text_log_loaded machine_id=%s log_key=%s bytes=%s",
+        machine_id,
+        log_key,
+        len(content),
+    )
+    return {
+        "path": log_key,
+        "text": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+    }
 
 
 @app.get("/api/v1/machine/logs", response_model=list[LogFileInfo])
@@ -540,7 +462,9 @@ def download_machine_log(machine_id: str, log_key: str):
         Streaming file response with ``Content-Disposition: attachment``.
     """
     start_time = time.perf_counter()
-    logger.info(f"API request: /api/v1/machine/logs/download machine_id={machine_id} log_key={log_key}")
+    logger.info(
+        f"API request: /api/v1/machine/logs/download machine_id={machine_id} log_key={log_key}"
+    )
 
     strategy = MachineLogsStrategy(DATA_DIR)
     try:
@@ -561,7 +485,11 @@ def download_machine_log(machine_id: str, log_key: str):
             detail=f"Log file '{log_key}' not found for machine '{machine_id}'.",
         )
 
-    media_type = "application/gzip" if file_path.name.endswith(".gz") else "text/plain; charset=utf-8"
+    media_type = (
+        "application/gzip"
+        if file_path.name.endswith(".gz")
+        else "text/plain; charset=utf-8"
+    )
 
     def _iter_file():
         chunk_size = 64 * 1024

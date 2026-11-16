@@ -5,3 +5,4 @@ pydantic==2.11.9
 pydantic-settings==2.11.0
 boto3==1.40.18
 botocore==1.40.18
+httpx==0.28.1

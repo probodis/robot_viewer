@@ -3,11 +3,18 @@
     <h2>Log File Viewer</h2>
 
     <div v-if="isLoading">Loading log file...</div>
-    <div v-else-if="error" class="error">{{ error }}</div>
+    <div v-else-if="error" class="error" role="alert">
+      <p>{{ error }}</p>
+      <a v-if="isTooLarge" :href="downloadUrl">Download original log file</a>
+    </div>
     <div v-else>
       <div class="logfile-meta">
-        <span>Machine: <b>{{ machineId }}</b></span>
-        <span style="margin-left:20px">File: <b>{{ logKey }}</b></span>
+        <span
+          >Machine: <b>{{ machineId }}</b></span
+        >
+        <span style="margin-left: 20px"
+          >File: <b>{{ logKey }}</b></span
+        >
       </div>
 
       <pre class="logfile-content" v-html="highlighted"></pre>
@@ -27,10 +34,14 @@ const logKey = route.query.log_key || ''
 const isLoading = ref(true)
 const error = ref('')
 const decoded = ref('')
+const isTooLarge = ref(false)
+const downloadUrl = api.getLogDownloadUrl(machineId, logKey)
 
 function decodeBase64(text) {
   try {
-    return decodeURIComponent(escape(window.atob(text)))
+    return new TextDecoder().decode(
+      Uint8Array.from(window.atob(text), (char) => char.charCodeAt(0)),
+    )
   } catch {
     return '[Failed to decode log file]'
   }
@@ -39,7 +50,11 @@ function decodeBase64(text) {
 const highlighted = computed(() => {
   if (!decoded.value) return ''
 
+  // Machine log contents are untrusted; escape markup before adding highlights.
   return decoded.value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
     .replace(/error/gi, '<span class="log-error">$&</span>')
     .replace(/debug/gi, '<span class="log-debug">$&</span>')
     .replace(/warn(ing)?/gi, '<span class="log-warning">$&</span>')
@@ -49,8 +64,13 @@ async function fetchLog() {
   try {
     const resp = await api.getLogFile(machineId, logKey)
     decoded.value = decodeBase64(resp.data.text)
-  } catch {
-    error.value = 'Failed to load log file.'
+  } catch (failure) {
+    isTooLarge.value = failure.response?.status === 413
+    error.value = isTooLarge.value
+      ? 'This log is too large to display. Download the original file to inspect it.'
+      : failure.response?.status === 404
+        ? 'This log file was not found.'
+        : 'Unable to read this log file. It may be unavailable or damaged.'
   } finally {
     isLoading.value = false
   }

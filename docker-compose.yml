@@ -5,6 +5,7 @@ services:
       - "8000:8000"
     env_file:
       - /etc/xrobotics/secrets/.env
+      - /etc/xrobotics/secrets/robot-viewer-postgrest.env
     volumes:
       - ./backend:/app
       - /home/ubuntu/xcubes/:/data:ro

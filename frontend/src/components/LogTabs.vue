@@ -24,15 +24,15 @@
 </template>
 
 <script setup>
-import { ref, watch, computed } from "vue"
-import { useRouter, useRoute } from "vue-router"
+import { ref, watch, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 
 const props = defineProps({
   logs: {
     type: Object,
-    required: true
-  }
-});
+    required: true,
+  },
+})
 
 const activeTab = ref(null)
 const router = useRouter()
@@ -43,9 +43,11 @@ const decodedLogs = computed(() => {
   for (const [filename, entry] of Object.entries(props.logs || {})) {
     // defensive: entry may be null / missing text
     try {
-      result[filename] = entry?.text ? atob(entry.text) : "";
-    } catch (e) {
-      result[filename] = entry?.text ?? ""
+      result[filename] = entry?.text
+        ? new TextDecoder().decode(Uint8Array.from(atob(entry.text), (char) => char.charCodeAt(0)))
+        : ''
+    } catch {
+      result[filename] = entry?.text ?? ''
     }
   }
   return result
@@ -55,12 +57,12 @@ watch(
   () => props.logs,
   (logs) => {
     if (logs && Object.keys(logs).length > 0) {
-      activeTab.value = Object.keys(logs)[0]
+      if (!logs[activeTab.value]) activeTab.value = Object.keys(logs)[0]
     } else {
       activeTab.value = null
     }
   },
-  { immediate: true }
+  { immediate: true },
 )
 
 /**
@@ -69,25 +71,24 @@ watch(
  * @param {string} key - The log file key to open.
  */
 function openLogFile(key) {
-    // Build the target route location using current machine_id and log_key
-    const machine_id = route.query.machine_id || "";
+  // Build the target route location using current machine_id and log_key
+  const machine_id = route.query.machine_id || ''
 
-    // Generate the URL using the router's resolve method
-    const location = router.resolve({
-        name: "logfile-view",
-        query: {
-            machine_id,
-            log_key: key
-        }
-    });
+  // Generate the URL using the router's resolve method
+  const location = router.resolve({
+    name: 'logfile-view',
+    query: {
+      machine_id,
+      log_key: key,
+    },
+  })
 
-    // Open the resolved URL in a new browser tab
-    window.open(location.href, "_blank");
+  // Open the resolved URL in a new browser tab
+  window.open(location.href, '_blank')
 }
 </script>
 
 <style scoped>
-
 .log-tabs {
   border: 1px solid #e0e0e0;
   border-radius: 8px;
@@ -101,7 +102,6 @@ function openLogFile(key) {
   box-sizing: border-box;
 }
 
-
 .tabs {
   display: flex;
   gap: 4px;
@@ -114,18 +114,20 @@ function openLogFile(key) {
   overflow-y: hidden;
 }
 
-
 .tab {
   flex: 0 0 auto;
   padding: 6px 12px;
   cursor: pointer;
   background: none;
-  border: 1px solid rgba(0,0,0,0.08);
+  border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 6px;
   outline: none;
   font-size: 0.95rem;
   color: #555;
-  transition: background 0.12s, color 0.12s, transform 0.08s;
+  transition:
+    background 0.12s,
+    color 0.12s,
+    transform 0.08s;
   white-space: nowrap;
   border-bottom: 2px solid transparent; /* fix height jump on active tab */
 }
@@ -146,7 +148,7 @@ function openLogFile(key) {
   padding: 16px;
   background: #fff;
   color: #222;
-  font-family: "Fira Mono", "Consolas", monospace;
+  font-family: 'Fira Mono', 'Consolas', monospace;
   font-size: 0.76rem;
   border-radius: 0 0 8px 8px;
   overflow: auto;
@@ -170,7 +172,7 @@ pre {
   width: 10px;
 }
 .log-content::-webkit-scrollbar-thumb {
-  background: rgba(0,0,0,0.2);
+  background: rgba(0, 0, 0, 0.2);
   border-radius: 6px;
 }
 </style>

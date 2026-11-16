@@ -2,6 +2,7 @@ from pathlib import Path
 import logging
 import boto3
 from botocore.exceptions import ClientError
+from botocore.config import Config as BotoConfig
 from pydantic import SecretStr
 
 from configs.config import Config
@@ -14,6 +15,8 @@ class S3Client:
         aws_access_key_id: SecretStr | None = None,
         aws_secret_access_key: SecretStr | None = None,
         endpoint_url: str | None = None,
+        region_name: str = "us-west-2",
+        read_timeout: float = 10,
     ):
         self.bucket_name = bucket_name
         self.client = boto3.client(
@@ -25,6 +28,8 @@ class S3Client:
             if aws_secret_access_key
             else None,
             endpoint_url=endpoint_url,
+            region_name=region_name,
+            config=BotoConfig(signature_version="s3v4", connect_timeout=3, read_timeout=read_timeout, retries={"total_max_attempts": 1}, max_pool_connections=16),
         )
         self.logger = logging.getLogger("robot_viewer")
 
@@ -51,7 +56,7 @@ class S3Client:
             if error_code in ("404", "NoSuchKey", "NotFound"):
                 return False
 
-            # Any other error — real problem
+            # Any other error â€” real problem
             self.logger.error(
                 f"S3 head_object failed: key='{key}' error={e.response}"
             )
@@ -99,7 +104,7 @@ class S3Client:
         Args:
             folder (Path): S3 folder (prefix).
             limit (int | None): Return only N files.
-            reverse (bool): Sort descending (Z → A).
+            reverse (bool): Sort descending (Z â†’ A).
 
         Returns:
             list[str]: List of file keys.
@@ -181,4 +186,6 @@ def get_s3_client(config: Config) -> S3Client:
         bucket_name=config.DATA_BUCKET_NAME,
         aws_access_key_id=config.AWS_ACCESS_KEY_ID,
         aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
+        region_name=config.AWS_S3_REGION,
+        read_timeout=config.S3_READ_TIMEOUT_SECONDS,
     )
