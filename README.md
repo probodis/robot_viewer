@@ -234,3 +234,8 @@ file selection when an automatic response arrives later.
 
 See [PostgREST order loading and verification](docs/postgrest-order-loading.md)
 for the midnight-file incident, expected log events and acceptance checks.
+
+## Release notes
+
+See [How to write release notes](docs/release-notes-guide.md) for the Telegram
+format and the approved [0.8.1 announcement](docs/releases/0.8.1.md).
