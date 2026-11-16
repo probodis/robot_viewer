@@ -26,6 +26,13 @@ export default {
   getMachineLogs: (machineId, options = {}) =>
     apiClient.get('/v1/machine/logs', { ...options, params: { machine_id: machineId } }),
 
+  /** Load the legacy default log tabs independently from video and telemetry. */
+  getOrderLogs: (machineId, orderId, options = {}) =>
+    apiClient.get('/v1/orders/logs', {
+      ...options,
+      params: { machine_id: machineId, order_id: orderId },
+    }),
+
   /** Extract a bounded order window from one explicitly selected file. */
   getOrderLogWindow: (machineId, orderId, logKey, options = {}) =>
     apiClient.get('/v1/orders/log-window', {

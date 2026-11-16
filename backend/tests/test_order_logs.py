@@ -1,4 +1,5 @@
 """User-selected log windows use content timestamps and hard read budgets."""
+
 import base64
 import gzip
 from pathlib import Path
@@ -23,13 +24,23 @@ class OrderLogWindowTests(unittest.TestCase):
     def write_file(self, log_key, content, compressed=False):
         path = self.root / MACHINE_ID / "logs" / log_key
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(gzip.compress(content.encode()) if compressed else content.encode())
+        path.write_bytes(
+            gzip.compress(content.encode()) if compressed else content.encode()
+        )
         return path
 
-    def test_previous_date_filename_uses_actual_utc_content_with_no_directory_scan(self):
+    def test_previous_date_filename_uses_actual_utc_content_with_no_directory_scan(
+        self,
+    ):
         key = "machine/2026-11-06_machine.txt.gz"
-        self.write_file(key, "2026-11-07 00:24:10 old\n2026-11-07 00:24:38 order-start\ncontinued detail\n2026-11-07 00:25:10 later\n", compressed=True)
-        with patch.object(Path, "iterdir", side_effect=AssertionError("No directory discovery")):
+        self.write_file(
+            key,
+            "2026-11-07 00:24:10 old\n2026-11-07 00:24:38 order-start\ncontinued detail\n2026-11-07 00:25:10 later\n",
+            compressed=True,
+        )
+        with patch.object(
+            Path, "iterdir", side_effect=AssertionError("No directory discovery")
+        ):
             result = self.service.get_window(MACHINE_ID, ORDER_ID, key)
         text = base64.b64decode(result["text"]).decode()
         self.assertEqual(result["status"], "available")
@@ -37,6 +48,23 @@ class OrderLogWindowTests(unittest.TestCase):
         self.assertIn("continued detail", text)
         self.assertNotIn("old", text)
         self.assertNotIn("later", text)
+        self.assertFalse(result["truncated"])
+
+    def test_manual_window_keeps_matching_records_after_a_clock_restart(self):
+        key = "machine/2026-11-07_machine.txt"
+        self.write_file(
+            key,
+            "2026-11-07 00:24:38 selected-first\n"
+            "2026-11-07 00:25:10 past-window\n"
+            "2026-11-07 00:24:40 clock-restart-matching\n"
+            "2026-11-07 00:26:10 irrelevant-tail\n",
+        )
+        result = self.service.get_window(MACHINE_ID, ORDER_ID, key)
+        text = base64.b64decode(result["text"]).decode()
+        self.assertIn("selected-first", text)
+        self.assertIn("clock-restart-matching", text)
+        self.assertNotIn("past-window", text)
+        self.assertNotIn("irrelevant-tail", text)
         self.assertFalse(result["truncated"])
 
     def test_oversize_single_line_stops_at_read_budget(self):
@@ -65,12 +93,21 @@ class OrderLogWindowTests(unittest.TestCase):
     def test_unbounded_order_duration_is_rejected(self):
         for duration in [None, 3601]:
             with self.subTest(duration=duration):
-                self.repository.get_order.return_value = order_record(total_time=duration)
+                self.repository.get_order.return_value = order_record(
+                    total_time=duration
+                )
                 with self.assertRaises(DiagnosticWindowUnavailable):
-                    self.service.get_window(MACHINE_ID, ORDER_ID, "machine/2026-11-06_machine.txt")
+                    self.service.get_window(
+                        MACHINE_ID, ORDER_ID, "machine/2026-11-06_machine.txt"
+                    )
 
     def test_paths_outside_selected_machine_are_rejected(self):
-        for key in ["../../outside.txt", "/outside.txt", "machine/%2e%2e/outside.txt", "videos/a.mp4"]:
+        for key in [
+            "../../outside.txt",
+            "/outside.txt",
+            "machine/%2e%2e/outside.txt",
+            "videos/a.mp4",
+        ]:
             with self.subTest(key=key):
                 with self.assertRaises(ValueError):
                     self.service.get_window(MACHINE_ID, ORDER_ID, key)
@@ -78,7 +115,9 @@ class OrderLogWindowTests(unittest.TestCase):
 
     def test_truncated_gzip_is_a_dependency_error(self):
         key = "machine/2026-11-06_machine.txt.gz"
-        path = self.write_file(key, "2026-11-07 00:24:38 order-start\n", compressed=True)
+        path = self.write_file(
+            key, "2026-11-07 00:24:38 order-start\n", compressed=True
+        )
         path.write_bytes(path.read_bytes()[:-5])
         with self.assertRaises(UpstreamUnavailable):
             self.service.get_window(MACHINE_ID, ORDER_ID, key)

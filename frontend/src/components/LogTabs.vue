@@ -6,7 +6,7 @@
         v-for="(item, filename) in logs"
         :key="filename"
         :class="['tab', { active: activeTab === filename }]"
-        @click="activeTab = filename"
+        @click="selectTab(filename)"
         @dblclick="() => openLogFile(filename)"
         role="tab"
         :aria-selected="activeTab === filename"
@@ -32,8 +32,10 @@ const props = defineProps({
     type: Object,
     required: true,
   },
+  activeKey: { type: String, default: null },
 })
 
+const emit = defineEmits(['update:activeKey'])
 const activeTab = ref(null)
 const router = useRouter()
 const route = useRoute()
@@ -54,10 +56,27 @@ const decodedLogs = computed(() => {
 })
 
 watch(
+  () => props.activeKey,
+  (key) => {
+    if (key && props.logs[key]) activeTab.value = key
+  },
+  { immediate: true },
+)
+
+function selectTab(key) {
+  activeTab.value = key
+  emit('update:activeKey', key)
+}
+
+watch(
   () => props.logs,
   (logs) => {
     if (logs && Object.keys(logs).length > 0) {
-      if (!logs[activeTab.value]) activeTab.value = Object.keys(logs)[0]
+      if (props.activeKey && logs[props.activeKey]) {
+        activeTab.value = props.activeKey
+      } else if (!logs[activeTab.value]) {
+        selectTab(Object.keys(logs)[0])
+      }
     } else {
       activeTab.value = null
     }

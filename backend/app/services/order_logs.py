@@ -1,9 +1,11 @@
-"""Explicit, bounded log-window reads; never discover files by calendar date."""
+"""Bounded reads of explicit text log windows, shared by manual and default logs."""
 
 import base64
 import gzip
 import logging
+import time
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from adapters.order_assets import validate_order_identity
@@ -20,6 +22,33 @@ MAX_ORDER_SECONDS = 3600
 
 class DiagnosticWindowUnavailable(ValueError):
     """Order metadata does not define a bounded diagnostic window."""
+
+
+@dataclass
+class LogReadBudget:
+    """An aggregate decoded-data budget, shared across one diagnostics request."""
+
+    max_input_bytes: int
+    max_output_bytes: int
+    deadline: float | None = None
+    input_bytes: int = 0
+    output_bytes: int = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return (
+            self.input_bytes >= self.max_input_bytes
+            or self.output_bytes >= self.max_output_bytes
+            or (self.deadline is not None and time.perf_counter() >= self.deadline)
+        )
+
+
+@dataclass(frozen=True)
+class LogWindow:
+    text: str
+    status: str
+    truncated: bool
+    bytes_scanned: int
 
 
 def resolve_text_log(data_dir: Path, machine_id: str, log_key: str) -> Path:
@@ -42,6 +71,75 @@ def resolve_text_log(data_dir: Path, machine_id: str, log_key: str) -> Path:
     return path
 
 
+def read_log_window(
+    path: Path,
+    window_start: float,
+    window_end: float,
+    budget: LogReadBudget,
+    *,
+    stop_at_window_end: bool = False,
+) -> LogWindow:
+    """Read UTC content timestamps under per-file and aggregate decoded-byte limits.
+
+    Manual reads do not assume content is sorted: machine clocks and restarts
+    can produce non-monotonic records. Automatic legacy selection opts into the
+    old chronological early exit. The aggregate deadline is checked per line;
+    gzip is bounded after decompression, rather than by compressed file size.
+    """
+    scanned = output_bytes = 0
+    output: list[str] = []
+    last_ts = None
+    found_timestamp = truncated = False
+    opener = gzip.open if path.suffix == ".gz" else open
+    try:
+        with opener(path, "rb") as stream:
+            for _ in range(MAX_INPUT_LINES):
+                if budget.exhausted:
+                    truncated = True
+                    break
+                remaining = min(
+                    MAX_INPUT_BYTES - scanned,
+                    budget.max_input_bytes - budget.input_bytes,
+                )
+                raw = stream.readline(remaining + 1)
+                if not raw:
+                    break
+                scanned += len(raw)
+                budget.input_bytes += len(raw)
+                if (
+                    scanned > MAX_INPUT_BYTES
+                    or budget.input_bytes > budget.max_input_bytes
+                ):
+                    truncated = True
+                    break
+                text = raw.decode("utf-8", errors="replace")
+                timestamp = parse_timestamp(text)
+                if timestamp is not None:
+                    last_ts = timestamp
+                    found_timestamp = True
+                    if stop_at_window_end and timestamp > window_end:
+                        break
+                if last_ts is not None and window_start <= last_ts <= window_end:
+                    size = len(text.encode("utf-8"))
+                    if (
+                        output_bytes + size > MAX_OUTPUT_BYTES
+                        or budget.output_bytes + size > budget.max_output_bytes
+                    ):
+                        truncated = True
+                        break
+                    output_bytes += size
+                    budget.output_bytes += size
+                    output.append(text)
+            else:
+                truncated = True
+    except (OSError, EOFError, zlib.error):
+        raise DiagnosticLogUnavailable(
+            "Requested text log could not be read."
+        ) from None
+    status = "available" if output else ("empty" if found_timestamp else "no_timestamp")
+    return LogWindow("".join(output), status, truncated, scanned)
+
+
 class OrderLogWindowService:
     def __init__(self, repository: OrdersRepository, data_dir: Path):
         self._repository = repository
@@ -59,56 +157,24 @@ class OrderLogWindowService:
             )
         if not path.is_file():
             raise FileNotFoundError("Requested text log is unavailable.")
-        start, end = order_id - 5, order_id + record.total_time + 5
-        scanned = output_bytes = 0
-        output = []
-        last_ts = None
-        found_timestamp = truncated = False
-        opener = gzip.open if path.suffix == ".gz" else open
-        try:
-            with opener(path, "rb") as stream:
-                for _ in range(MAX_INPUT_LINES):
-                    raw = stream.readline(MAX_INPUT_BYTES - scanned + 1)
-                    if not raw:
-                        break
-                    scanned += len(raw)
-                    if scanned > MAX_INPUT_BYTES:
-                        truncated = True
-                        break
-                    text = raw.decode("utf-8", errors="replace")
-                    timestamp = parse_timestamp(text)
-                    if timestamp is not None:
-                        last_ts = timestamp
-                        found_timestamp = True
-                    if last_ts is not None and start <= last_ts <= end:
-                        output_bytes += len(text.encode("utf-8"))
-                        if output_bytes > MAX_OUTPUT_BYTES:
-                            truncated = True
-                            break
-                        output.append(text)
-                else:
-                    truncated = True
-        except (OSError, EOFError, zlib.error):
-            raise DiagnosticLogUnavailable(
-                "Requested text log could not be read."
-            ) from None
-        status = (
-            "available" if output else ("empty" if found_timestamp else "no_timestamp")
+        budget = LogReadBudget(MAX_INPUT_BYTES, MAX_OUTPUT_BYTES)
+        result = read_log_window(
+            path, order_id - 5, order_id + record.total_time + 5, budget
         )
         logger.info(
             "event=order_log_window_loaded machine_id=%s order_id=%s log_key=%s bytes_scanned=%s truncated=%s status=%s",
             machine_id,
             order_id,
             log_key,
-            scanned,
-            truncated,
-            status,
+            result.bytes_scanned,
+            result.truncated,
+            result.status,
         )
         return {
             "log_key": log_key,
-            "text": base64.b64encode("".join(output).encode("utf-8")).decode("ascii"),
-            "truncated": truncated,
-            "status": status,
+            "text": base64.b64encode(result.text.encode("utf-8")).decode("ascii"),
+            "truncated": result.truncated,
+            "status": result.status,
             "extra_weight_points": [],
             "extra_weight_points_status": "not_available",
         }

@@ -62,4 +62,4 @@ class OrderTelemetry(BaseModel):
         "available", "not_recorded", "not_uploaded", "invalid", "unavailable"
     ] = "available"
     video_status: Literal["referenced", "not_recorded", "unavailable"] = "not_recorded"
-    diagnostics_status: Literal["on_demand"] = "on_demand"
+    diagnostics_status: Literal["on_demand", "separate_request"] = "separate_request"

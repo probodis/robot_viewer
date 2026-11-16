@@ -8,6 +8,7 @@ from adapters.s3 import get_s3_client
 from configs.config import get_config
 from datetime import datetime
 from contextlib import asynccontextmanager
+from threading import BoundedSemaphore
 from pydantic import ValidationError
 import httpx
 
@@ -25,6 +26,7 @@ from app.constants import DATA_DIR, LOGS_DIR
 from adapters.postgrest import PostgrestOrdersRepository
 from adapters.order_assets import S3OrderAssets
 from app.services.order_viewer import OrderViewerService
+from app.services.default_order_logs import AutomaticOrderLogsService
 from app.services.order_logs import (
     OrderLogWindowService,
     DiagnosticWindowUnavailable,
@@ -108,14 +110,30 @@ async def lifespan(app: FastAPI):
         ),
         limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
         follow_redirects=False,
-    ) as client:
+    ) as client, httpx.Client(
+        base_url=str(config.POSTGREST_BASE_URL).rstrip("/") + "/",
+        headers={"X-API-Key": config.POSTGREST_API_KEY.get_secret_value()},
+        timeout=httpx.Timeout(
+            config.POSTGREST_TIMEOUT_SECONDS,
+            connect=config.POSTGREST_CONNECT_TIMEOUT_SECONDS,
+        ),
+        limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        follow_redirects=False,
+    ) as diagnostics_client:
         storage = get_s3_client(config)
         try:
             repository = PostgrestOrdersRepository(client)
             app.state.order_service = OrderViewerService(
                 repository, S3OrderAssets(storage, config.TELEMETRY_MAX_BYTES)
             )
-            app.state.order_log_service = OrderLogWindowService(repository, DATA_DIR)
+            diagnostics_repository = PostgrestOrdersRepository(diagnostics_client)
+            app.state.order_log_service = OrderLogWindowService(
+                diagnostics_repository, DATA_DIR
+            )
+            app.state.default_order_log_service = AutomaticOrderLogsService(
+                diagnostics_repository, DATA_DIR
+            )
+            app.state.diagnostics_gate = BoundedSemaphore(1)
             logger.info("event=order_dependencies_ready version=%s", backend_version)
             yield
         finally:
@@ -128,6 +146,29 @@ def get_order_service(request: Request) -> OrderViewerService:
 
 def get_order_log_service(request: Request) -> OrderLogWindowService:
     return request.app.state.order_log_service
+
+
+def get_default_order_log_service(request: Request) -> AutomaticOrderLogsService:
+    return request.app.state.default_order_log_service
+
+
+def reserve_diagnostics_slot(request: Request):
+    """Reject excess log work instead of consuming every shared request thread.
+
+    Each worker admits at most one automatic/manual log-window request, and its
+    dedicated metadata pool cannot exhaust the main video/telemetry HTTP pool.
+    """
+    gate = request.app.state.diagnostics_gate
+    if not gate.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Log diagnostics are busy. Retry logs shortly.",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        yield
+    finally:
+        gate.release()
 
 
 app = FastAPI(
@@ -260,12 +301,45 @@ def get_order_telemetry(
     return result
 
 
+@app.get("/api/v1/orders/logs")
+def get_default_order_logs(
+    machine_id: str,
+    order_id: float,
+    service: AutomaticOrderLogsService = Depends(get_default_order_log_service),
+    _slot: None = Depends(reserve_diagnostics_slot),
+):
+    """Load the legacy default log tabs separately from order/video/telemetry."""
+    try:
+        result = service.get_logs(machine_id, order_id)
+    except DiagnosticWindowUnavailable:
+        raise HTTPException(
+            status_code=409, detail="Order has no bounded diagnostic time window."
+        ) from None
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="Invalid machine identifier or order timestamp."
+        ) from None
+    except InvalidUpstreamResponse:
+        raise HTTPException(
+            status_code=502,
+            detail="Order metadata service returned an invalid response.",
+        ) from None
+    except (UpstreamUnavailable, OSError):
+        raise HTTPException(
+            status_code=503, detail="Order logs are temporarily unavailable."
+        ) from None
+    if result is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+    return result
+
+
 @app.get("/api/v1/orders/log-window")
 def get_order_log_window(
     machine_id: str,
     order_id: float,
     log_key: str,
     service: OrderLogWindowService = Depends(get_order_log_service),
+    _slot: None = Depends(reserve_diagnostics_slot),
 ):
     """Read a bounded UTC window from one explicitly selected text log."""
     try:

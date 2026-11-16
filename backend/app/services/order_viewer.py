@@ -127,5 +127,5 @@ class OrderViewerService:
             extra_weight_points=[],
             telemetry_status=telemetry_status,
             video_status=video_status,
-            diagnostics_status="on_demand",
+            diagnostics_status="separate_request",
         )

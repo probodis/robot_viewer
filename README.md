@@ -21,8 +21,11 @@ The machine uploads a per-order JSON and video, then sends their relative
 
 An order request uses exact machine and UID filters with a one-row limit.
 It does not list local directories, scan daily telemetry archives, list S3 keys,
-or guess video filenames. Opening a page also does not search scanner archives
-or list additional logs; those operations require an explicit user action.
+or guess video filenames. Once the order is ready, the frontend independently
+requests its default log tabs through `GET /api/v1/orders/logs`. This restores
+the previous automatic log selection without adding filesystem work to the
+video/telemetry request. Scanner search and the full machine-file list remain
+explicit user actions.
 
 ## Project structure
 
@@ -31,7 +34,8 @@ or list additional logs; those operations require an explicit user action.
 - `backend/app/schemas/`: validated metadata and viewer response contracts.
 - `backend/app/main.py`: HTTP routes and dependency lifecycle.
 - `frontend/src/composables/useOrderData.js`: cancelable order loading and explicit scanner search.
-- `frontend/src/components/OrderDiagnostics.vue`: manual log selection and window loading.
+- `frontend/src/composables/useOrderDiagnostics.js`: independent automatic/manual log requests and cancellation.
+- `frontend/src/components/OrderDiagnostics.vue`: automatic log tabs and optional manual selection.
 - `docs/`: architecture, operation and incident notes.
 
 ## Backend configuration
@@ -104,8 +108,8 @@ make deploy-frontend
 
 `make deploy` also fetches and hard-resets to `origin/main`; use it only when
 that is the intended release. Do not use it to test an uncommitted change.
-The backend uses `/home/ubuntu/xcubes/` read-only for explicitly requested
-machine logs, and writes application logs to `/home/ubuntu/logs/robot_viewer/`.
+The backend uses `/home/ubuntu/xcubes/` read-only for automatic default tabs and
+explicitly selected machine logs, and writes application logs to `/home/ubuntu/logs/robot_viewer/`.
 
 Existing nginx must route `/robot_viewer/api/` to the backend and serve the
 frontend assets under `/robot_viewer/`. The static location is:
@@ -126,6 +130,7 @@ Build the frontend independently with:
 ```sh
 cd frontend
 npm ci
+npm test
 npm run build
 ```
 
@@ -138,7 +143,7 @@ retains the existing chart/video response fields and adds explicit statuses:
 | -------------------- | --------------------------------------------------------------------- |
 | `telemetry_status`   | `available`, `not_recorded`, `not_uploaded`, `invalid`, `unavailable` |
 | `video_status`       | `referenced`, `not_recorded`, `unavailable`                           |
-| `diagnostics_status` | `on_demand`                                                           |
+| `diagnostics_status` | `separate_request` (`on_demand` retained for compatibility)                                                           |
 
 `not_recorded` means the database has no reference, not that a raw historical
 archive has been exhaustively searched. `not_uploaded` means the referenced
@@ -154,9 +159,46 @@ return 503; rejected or malformed metadata responses return 502. They are not
 reported as a nonexistent order. Old orders without stored artifact references
 do not trigger archive scans or automatic historical reconstruction.
 
-## Diagnostics on demand
+## Automatic logs and manual diagnostics
+
+Opening an order first displays its available video and charts. The separate
+`GET /api/v1/orders/logs?machine_id=...&order_id=...` request then populates
+the same bottom log tabs automatically. Loading/error/retry state belongs only
+to the Logs section. **Reload logs** retries that request without reloading the
+order, refreshing its video link or resetting video playback.
+
+Default selection retains the previous rule: for each raw-text subdirectory and
+suffix, select the latest non-backup file whose filename date is at or before
+the UTC order date; prefer `.gz` to its `.txt` equivalent. This is deliberately
+a compatibility rule, not proof that a file contains the order. Records may
+span midnight or multiple days. Use **Choose another log file** when another
+physical file is needed. Empty, failed or budget-limited files remain visible
+as explanatory tabs rather than blocking other logs.
+
+Automatic window extraction also retains the former chronological-read
+assumption: once a supported timestamp is later than the order window, it
+stops reading that file. This avoids decompressing the remainder of a later
+session archive, but out-of-order records can be omitted. The manually selected
+window reader does not use that early exit and can inspect out-of-order records
+within its own input/output limits. Neither mode supplies a complete historical
+time-range catalog.
+
+The automatic endpoint has independent workload admission, metadata connections
+and finite selection/read/output budgets. `status=partial` or `truncated=true`
+means the result is incomplete; it must not be interpreted as absence of logs.
+The response contains `logs`, `status`, `truncated`, `selected_files` and
+`loaded_files`. Automatic work is capped at 32 selected files, 100,000
+scanned directory entries, 32 MiB decompressed input, 2 MiB text output and a
+5-second cooperative deadline (checked between directory entries and reads).
+Each worker admits one diagnostics read at a time; busy responses include
+`Retry-After: 2`. These bounds do not turn filesystem I/O into a hard real-time
+deadline, and they do not guarantee that legacy filename selection finds every
+relevant record. Each log has a relative `path`, Base64 `text`, `status` and
+`truncated`. A busy diagnostics worker returns 503; clients retry only on an
+explicit action, not in an automatic loop.
 
 - **Find scanner archive** invokes the existing scanner endpoint only when clicked.
+- **Choose another log file** reveals the optional manual controls.
 - **Browse machine logs** explicitly lists files via `GET /api/v1/machine/logs`.
 - Select one text file and click **Load order window** to call
   `GET /api/v1/orders/log-window?machine_id=...&order_id=...&log_key=...`.
@@ -169,17 +211,24 @@ missing duration returns 409 rather than guessing. Full-file views are separate
 explicit reads capped at 10 MiB decompressed. Larger files return 413 and the
 interface offers a download of the original file instead.
 
-The main order response has `logs={}` and `extra_weight_points=[]`.
+The main order response still has `logs={}` and `extra_weight_points=[]`; logs
+arrive through their independent request. `diagnostics_status=separate_request` explicitly describes this separate
+transport; `on_demand` remains accepted for compatibility.
 Additional sauce-weight points are not reconstructed from a daily filename:
 that date can differ from its records' actual day. The manual log window reports
 `extra_weight_points_status=not_available`. Weight series present in the
 per-order telemetry JSON remain available in the charts. A future historical
 index or conversion job can restore missing references and supplementary points
-without adding an archive search to page loading.
+without coupling archive reads back to the main order request.
 
 The machine video list remains available at `/robot_viewer/machine/<machine_id>`
 and `GET /api/v1/machine/videos?machine_id=<machine_id>`. It lists recent videos
 only when that separate page is opened.
+
+Frontend tests require Node.js 22.12+, 24.x or 26+ and use Vitest with mounted
+Vue components. They cover pending/failing automatic logs, independent log
+retry, stale responses after navigation, and preservation of explicit manual
+file selection when an automatic response arrives later.
 
 ## Incident investigation
 
